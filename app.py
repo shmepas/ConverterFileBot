@@ -1,9 +1,6 @@
 import asyncio
 import os
 
-import asyncio
-import os
-
 from aiogram import Bot, Dispatcher, types
 
 
@@ -34,3 +31,4 @@ async def main():
 
 
 asyncio.run(main())
+
