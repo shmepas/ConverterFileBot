@@ -9,11 +9,11 @@ Project
 │
 ├── handlers
 │   ├── adminka.py
-│   ├── user_group.py
-│   └── user_privatka.py       # Хендлеры
+│   ├── user_group.py          # Хендлеры
+│   └── user_privatka.py       
 │
-├── keyboards                  # Под вопросом пока
-│   └── inline_keyboards.py    # Все InlineKeyboardMarkup и кнопки
+???├── keyboards                  # Под вопросом пока
+│   ???└── inline_keyboards.py    # Все InlineKeyboardMarkup и кнопки
 │
 ├── README.md                  # Инфа о боте
 │
