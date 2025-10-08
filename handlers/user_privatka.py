@@ -17,10 +17,10 @@ class MenuStates(StatesGroup):
     formats = State()
     history_payment = State()  # отдельное состояние для кнопки "Платежи"
 
-# === Вспомогательная функция перехода ===
+# === Универсальная функция перехода ===
 async def change_state(message: types.Message, state: FSMContext, new_state: State, text: str, keyboard):
     """
-    Универсальная функция перехода на новый экран без панели навигации
+    Универсальная функция перехода на новый экран без навигации сверху
     """
     data = await state.get_data()
     history = data.get("history", [])
@@ -32,37 +32,47 @@ async def change_state(message: types.Message, state: FSMContext, new_state: Sta
     await state.update_data(history=history)
     await state.set_state(new_state)
 
-    try:
-        await message.edit_text(text, reply_markup=keyboard.as_markup(resize_keyboard=True))
-    except Exception:
-        await message.answer(text, reply_markup=keyboard.as_markup(resize_keyboard=True))
+    # Убираем старую клавиатуру перед показом нового меню
+    await message.answer(
+        text,
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
+    await message.answer(
+        text,
+        reply_markup=keyboard.as_markup(resize_keyboard=True)
+    )
 
 
-# === Хендлеры команд ===
+# === /start ===
 @user_privatka_router.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.main)
     await message.answer(
         "Привет! 👋 Я твой личный конвертер файлов.",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await message.answer(
+        "Главное меню 👇",
         reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
     )
 
+
+# === /menu ===
 @user_privatka_router.message(Command("menu"))
 async def menu_cmd(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.main)
-    try:
-        await message.edit_text(
-            "Главное меню 👇",
-            reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
-        )
-    except Exception:
-        await message.answer(
-            "Главное меню 👇",
-            reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
-        )
+    await message.answer(
+        "Главное меню 👇",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await message.answer(
+        "Главное меню 👇",
+        reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
+    )
 
 
-# === Кнопка "Назад" ===
+# === Кнопка «Назад» ===
 @user_privatka_router.message(F.text.lower().contains("назад"))
 async def back_handler(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -70,17 +80,21 @@ async def back_handler(message: types.Message, state: FSMContext):
 
     if not history:
         await state.set_state(MenuStates.main)
-        try:
-            await message.edit_reply_markup(reply_markup=reply.start_kb3.as_markup(resize_keyboard=True))
-        except Exception:
-            await message.answer(reply_markup=reply.start_kb3.as_markup(resize_keyboard=True))
+        await message.answer(
+            "Главное меню 👇",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await message.answer(
+            "Главное меню 👇",
+            reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
+        )
         return
 
     last_state = history.pop()
     await state.update_data(history=history)
     await state.set_state(last_state)
 
-    # текст и клавиатура для предыдущего экрана
+    # выбираем текст и клавиатуру по состоянию
     if last_state == MenuStates.main.state:
         text = "Главное меню 👇"
         kb = reply.start_kb3
@@ -98,16 +112,21 @@ async def back_handler(message: types.Message, state: FSMContext):
         text = "В разработке 🚧"
         kb = reply.back_kb
 
-    try:
-        await message.edit_text(text, reply_markup=kb.as_markup(resize_keyboard=True))
-    except Exception:
-        await message.answer(text, reply_markup=kb.as_markup(resize_keyboard=True))
+    # Очистка предыдущей клавиатуры
+    await message.answer(
+        text,
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await message.answer(
+        text,
+        reply_markup=kb.as_markup(resize_keyboard=True)
+    )
 
 
-# === Универсальный хендлер текста (кнопки клавиатуры) ===
+# === Обработка кнопок (ReplyKeyboard) ===
 @user_privatka_router.message(F.text)
 async def keyboard_handler(message: types.Message, state: FSMContext):
-    # === Автоинициализация состояния ===
+    # автоинициализация состояния, если бот перезапущен
     if not await state.get_state():
         await state.set_state(MenuStates.main)
 
@@ -115,16 +134,14 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
 
     if text in ["меню"]:
         await state.set_state(MenuStates.main)
-        try:
-            await message.edit_text(
-                "Главное меню 👇",
-                reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
-            )
-        except Exception:
-            await message.answer(
-                "Главное меню 👇",
-                reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
-            )
+        await message.answer(
+            "Главное меню 👇",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await message.answer(
+            "Главное меню 👇",
+            reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
+        )
 
     elif text in ["о боте", "инфа"]:
         await change_state(
@@ -169,6 +186,5 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
     else:
         await message.answer(
             "Я не совсем понял твоё сообщение 😅\n"
-            "Нажми на одну из кнопок снизу"
+            "Попробуй одну из кнопок или команд:\n/menu, /about, /payment, /formats"
         )
-        
