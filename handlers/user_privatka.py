@@ -188,3 +188,4 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
             "Я не совсем понял твоё сообщение 😅\n"
             "Попробуй одну из кнопок или команд:\n/menu, /about, /payment, /formats"
         )
+        
