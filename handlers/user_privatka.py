@@ -19,9 +19,6 @@ class MenuStates(StatesGroup):
 
 # === Универсальная функция перехода ===
 async def change_state(message: types.Message, state: FSMContext, new_state: State, text: str, keyboard):
-    """
-    Универсальная функция перехода на новый экран без навигации сверху
-    """
     data = await state.get_data()
     history = data.get("history", [])
 
@@ -32,16 +29,12 @@ async def change_state(message: types.Message, state: FSMContext, new_state: Sta
     await state.update_data(history=history)
     await state.set_state(new_state)
 
-    # Убираем старую клавиатуру перед показом нового меню
-    await message.answer(
-        text,
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-
+    # Просто отправляем новое сообщение с клавиатурой
     await message.answer(
         text,
         reply_markup=keyboard.as_markup(resize_keyboard=True)
     )
+
 
 
 # === /start ===
