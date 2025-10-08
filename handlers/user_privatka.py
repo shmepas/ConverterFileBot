@@ -25,7 +25,7 @@ async def menu_cmd(message: types.Message):
         "/menu - показать команды\n"
         "/about - информация о боте\n"
         "/payment - варианты оплаты\n"
-        "/formats - доступные файл-форматыы"
+        "/formats - доступные файл-форматы"
     )
 
 
