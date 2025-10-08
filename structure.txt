@@ -12,8 +12,8 @@ Project
 │   ├── user_group.py          # Хендлеры
 │   └── user_privatka.py       
 │
-???├── keyboards                  # Под вопросом пока
-│   ?└── inline_keyboards.py    # Все InlineKeyboardMarkup и кнопки
+├── keyboards                  # Под вопросом пока
+│   └── inline_keyboards.py    # Все InlineKeyboardMarkup и кнопки
 │
 ├── README.md                  # Инфа о боте
 │
