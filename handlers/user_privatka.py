@@ -107,6 +107,10 @@ async def back_handler(message: types.Message, state: FSMContext):
 # === Универсальный хендлер текста (кнопки клавиатуры) ===
 @user_privatka_router.message(F.text)
 async def keyboard_handler(message: types.Message, state: FSMContext):
+    # === Автоинициализация состояния ===
+    if not await state.get_state():
+        await state.set_state(MenuStates.main)
+
     text = message.text.lower()
 
     if text in ["меню"]:
@@ -165,5 +169,5 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
     else:
         await message.answer(
             "Я не совсем понял твоё сообщение 😅\n"
-            "Попробуй одну из кнопок или команд:\n/menu, /about, /payment, /formats"
+            "Нажми на одну из кнопок снизу"
         )
