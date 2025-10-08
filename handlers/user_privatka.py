@@ -1,76 +1,169 @@
-from aiogram import  F, types, Router
-from aiogram.filters import CommandStart, Command, or_f
+from aiogram import F, types, Router
+from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from filters.chat_types import ChatTypeFilter
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram import F, types
+from kbds import reply
 
-
+# === Инициализация ===
 user_privatka_router = Router()
-user_privatka_router.message.filter(ChatTypeFilter(['private']))
+user_privatka_router.message.filter(ChatTypeFilter(["private"]))
+
+# === Состояния меню ===
+class MenuStates(StatesGroup):
+    main = State()
+    about = State()
+    payment = State()
+    formats = State()
+    history_payment = State()  # отдельное состояние для кнопки "Платежи"
+
+# === Вспомогательная функция перехода ===
+async def change_state(message: types.Message, state: FSMContext, new_state: State, text: str, keyboard):
+    """
+    Универсальная функция перехода на новый экран без панели навигации
+    """
+    data = await state.get_data()
+    history = data.get("history", [])
+
+    current_state = await state.get_state()
+    if current_state:
+        history.append(current_state)
+
+    await state.update_data(history=history)
+    await state.set_state(new_state)
+
+    try:
+        await message.edit_text(text, reply_markup=keyboard.as_markup(resize_keyboard=True))
+    except Exception:
+        await message.answer(text, reply_markup=keyboard.as_markup(resize_keyboard=True))
 
 
+# === Хендлеры команд ===
 @user_privatka_router.message(CommandStart())
-async def start_cmd(message: types.Message):
+async def start_cmd(message: types.Message, state: FSMContext):
+    await state.set_state(MenuStates.main)
     await message.answer(
-        "Здравствуй! Я твой личный преобразователь файлов!\n\n"
-        "Чтобы увидеть список команд, напиши /menu или 'меню'."
+        "Привет! 👋 Я твой личный конвертер файлов.",
+        reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
     )
 
-
-@user_privatka_router.message(or_f(Command("menu"), (F.text.lower().contains('меню')) | (F.text.lower() == "меню")))
-async def menu_cmd(message: types.Message):
-    await message.answer(
-        "Вот список доступных команд:\n"
-        "/start - приветствие\n"
-        "/menu - показать команды\n"
-        "/about - информация о боте\n"
-        "/payment - варианты оплаты\n"
-        "/formats - доступные файл-форматы"
-    )
-
-
-@user_privatka_router.message((F.text.lower().contains('инфа')) | (F.text.lower() == 'о боте'))
-@user_privatka_router.message(Command('about'))
-async def about_cmd(message: types.Message):
-    await message.answer(
-        "Я бот для конвертации файлов. Могу помочь с изменением формата!"
-    )
+@user_privatka_router.message(Command("menu"))
+async def menu_cmd(message: types.Message, state: FSMContext):
+    await state.set_state(MenuStates.main)
+    try:
+        await message.edit_text(
+            "Главное меню 👇",
+            reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
+        )
+    except Exception:
+        await message.answer(
+            "Главное меню 👇",
+            reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
+        )
 
 
-@user_privatka_router.message((F.text.lower().contains('оплата')) | (F.text.lower() == "варианты оплаты"))
-@user_privatka_router.message(Command("payment"))
-async def payment_cmd(message: types.Message):
-    await message.answer(
-        "Варианты оплаты:\n"
-        "1. Карта Visa/Mastercard\n"
-        "2. Qiwi / YooMoney\n"
-        "3. PayPal"
-    )
-    
+# === Кнопка "Назад" ===
+@user_privatka_router.message(F.text.lower().contains("назад"))
+async def back_handler(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    history = data.get("history", [])
 
-@user_privatka_router.message((F.text.lower().contains('формат')) | (F.text.lower() == 'Доступные файл-форматы'))
-@user_privatka_router.message(Command("formats"))
-async def formats_cmd(message: types.Message):
-    formats_list = [
-        "PDF", "DOCX", "TXT", "JPEG", "PNG", "MP3", "MP4"
-    ]
-    await message.answer(
-        "Доступные файл-форматы:\n" + "\n".join(f"- {f}" for f in formats_list)
-    )
+    if not history:
+        await state.set_state(MenuStates.main)
+        try:
+            await message.edit_reply_markup(reply_markup=reply.start_kb3.as_markup(resize_keyboard=True))
+        except Exception:
+            await message.answer(reply_markup=reply.start_kb3.as_markup(resize_keyboard=True))
+        return
+
+    last_state = history.pop()
+    await state.update_data(history=history)
+    await state.set_state(last_state)
+
+    # текст и клавиатура для предыдущего экрана
+    if last_state == MenuStates.main.state:
+        text = "Главное меню 👇"
+        kb = reply.start_kb3
+    elif last_state == MenuStates.about.state:
+        text = "Я бот для конвертации файлов.\nМогу помочь изменить формат!"
+        kb = reply.back_kb
+    elif last_state == MenuStates.payment.state:
+        text = "Варианты оплаты:\n1. Карта\n2. Qiwi\n3. PayPal"
+        kb = reply.back_kb
+    elif last_state == MenuStates.formats.state:
+        formats = ["PDF", "DOCX", "TXT", "JPEG", "PNG", "MP3", "MP4", "ZIP"]
+        text = "Доступные форматы:\n" + "\n".join(f"- {f}" for f in formats)
+        kb = reply.back_kb
+    elif last_state == MenuStates.history_payment.state:
+        text = "В разработке 🚧"
+        kb = reply.back_kb
+
+    try:
+        await message.edit_text(text, reply_markup=kb.as_markup(resize_keyboard=True))
+    except Exception:
+        await message.answer(text, reply_markup=kb.as_markup(resize_keyboard=True))
 
 
-
-# Обработчик, который отвечает на любое сообщение пользователя в личке
-@user_privatka_router.message()
-async def echo_all_messages(message: types.Message):
-    # Здесь можно обработать текст как угодно
-    await message.reply(message.text)
-
-
-
+# === Универсальный хендлер текста (кнопки клавиатуры) ===
 @user_privatka_router.message(F.text)
-async def catch_all_messages(message: types.Message):
-    await message.answer(
-        "Я не совсем понял твоё сообщение 😅\n"
-        "Попробуй одну из команд:\n/menu, /about, /payment, /formats"
-    )
+async def keyboard_handler(message: types.Message, state: FSMContext):
+    text = message.text.lower()
+
+    if text in ["меню"]:
+        await state.set_state(MenuStates.main)
+        try:
+            await message.edit_text(
+                "Главное меню 👇",
+                reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
+            )
+        except Exception:
+            await message.answer(
+                "Главное меню 👇",
+                reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
+            )
+
+    elif text in ["о боте", "инфа"]:
+        await change_state(
+            message,
+            state,
+            MenuStates.about,
+            "Я бот для конвертации файлов.\nМогу помочь изменить формат!",
+            reply.back_kb
+        )
+
+    elif text in ["оплата", "вариант оплаты"]:
+        await change_state(
+            message,
+            state,
+            MenuStates.payment,
+            "Варианты оплаты:\n1. Карта\n2. Qiwi\n3. PayPal",
+            reply.back_kb
+        )
+
+    elif text == "платежи":
+        await change_state(
+            message,
+            state,
+            MenuStates.history_payment,
+            "В разработке 🚧",
+            reply.back_kb
+        )
+
+    elif text in ["форматы", "доступные файл-форматы", "формат", "выбор формата"]:
+        formats = ["PDF", "DOCX", "TXT", "JPEG", "PNG", "MP3", "MP4", "ZIP"]
+        await change_state(
+            message,
+            state,
+            MenuStates.formats,
+            "Доступные форматы:\n" + "\n".join(f"- {f}" for f in formats),
+            reply.back_kb
+        )
+
+    elif text in ["⬅️ назад"]:
+        await back_handler(message, state)
+
+    else:
+        await message.answer(
+            "Я не совсем понял твоё сообщение 😅\n"
+            "Попробуй одну из кнопок или команд:\n/menu, /about, /payment, /formats"
+        )
