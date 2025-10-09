@@ -38,7 +38,10 @@ def build_markup(kb):
 # ------------------------------
 async def get_keyboard_by_role(user_id: int, admin_submenu: bool = False) -> types.ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    kb.attach(reply.start_kb3)
+    kb.attach(reply.start_kb3)  # Основные кнопки
+
+    # Кнопка "Моя роль" для всех
+    kb.row(types.KeyboardButton(text="Моя роль"))
 
     if await is_admin(user_id) or await is_super_admin(user_id):
         if admin_submenu:
@@ -79,12 +82,19 @@ async def start_cmd(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.main)
 
     await add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
-    kb = await get_keyboard_by_role(user_id)
 
-    role = "Супер-админ" if await is_super_admin(user_id) else "Админ" if await is_admin(user_id) else "Пользователь"
+    if await is_super_admin(user_id):
+        role = "Супер-админ"
+    elif await is_admin(user_id):
+        role = "Админ"
+    else:
+        role = "Пользователь"
+
     await log_action(user_id, f"Команда /start ({role})")
 
-    await message.answer("Привет! 👋 Я твой личный конвертер файлов.", reply_markup=types.ReplyKeyboardRemove())
+    kb = await get_keyboard_by_role(user_id)
+
+    await message.answer(f"Привет! 👋 Я твой личный конвертер файлов.\nВаша роль: {role}", reply_markup=types.ReplyKeyboardRemove())
     await message.answer("Главное меню 👇", reply_markup=build_markup(kb))
 
 # ------------------------------
@@ -132,7 +142,7 @@ async def back_handler(message: types.Message, state: FSMContext):
     await message.answer(text, reply_markup=build_markup(kb))
 
 # ------------------------------
-# Основные кнопки меню + админка
+# Основные кнопки меню + админка + моя роль
 # ------------------------------
 @user_privatka_router.message(F.text)
 async def keyboard_handler(message: types.Message, state: FSMContext):
@@ -141,6 +151,19 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
 
     if not await state.get_state():
         await state.set_state(MenuStates.main)
+
+    # ------------------------------
+    # Кнопка "Моя роль"
+    # ------------------------------
+    if text == "моя роль":
+        if await is_super_admin(user_id):
+            role = "Супер-админ"
+        elif await is_admin(user_id):
+            role = "Админ"
+        else:
+            role = "Пользователь"
+        await message.answer(f"Ваша роль: {role}")
+        return
 
     # ------------------------------
     # Обычное меню
