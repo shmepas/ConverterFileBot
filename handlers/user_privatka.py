@@ -57,10 +57,6 @@ async def menu_cmd(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.main)
     await message.answer(
         "Главное меню 👇",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-    await message.answer(
-        "Главное меню 👇",
         reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
     )
 
@@ -73,10 +69,6 @@ async def back_handler(message: types.Message, state: FSMContext):
 
     if not history:
         await state.set_state(MenuStates.main)
-        await message.answer(
-            "Главное меню 👇",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
         await message.answer(
             "Главное меню 👇",
             reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
@@ -127,10 +119,6 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
 
     if text in ["меню"]:
         await state.set_state(MenuStates.main)
-        await message.answer(
-            "Главное меню 👇",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
         await message.answer(
             "Главное меню 👇",
             reply_markup=reply.start_kb3.as_markup(resize_keyboard=True)
