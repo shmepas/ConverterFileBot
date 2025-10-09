@@ -59,10 +59,20 @@ async def add_user(user_id: int, username: str, first_name: str, last_name: str)
             await db.commit()
 
 # ==============================
-# Логирование действий
+# Логирование действий (минимальные корректировки)
 # ==============================
-async def log_action(user_id: int, action: str):
+async def log_action(user_id: int, action: str, username: str = None, first_name: str = None, last_name: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
+        # Добавляем пользователя в таблицу users, если его ещё нет
+        async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            exists = await cursor.fetchone()
+        if not exists:
+            await db.execute("""
+                INSERT INTO users (user_id, username, first_name, last_name, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, username, first_name, last_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        
+        # Логируем действие
         await db.execute("""
             INSERT INTO user_actions (user_id, action, timestamp)
             VALUES (?, ?, ?)

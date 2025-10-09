@@ -1,70 +1,96 @@
 from aiogram import Router, types
-from aiogram.filters import Command
-from data_base.db import is_admin, is_super_admin, log_action, get_user_logs, add_admin, remove_admin
-from kbds.admin_reply import admin_kb, super_admin_kb
+from data_base import db
+from kbds.admin_reply import admin_kb, super_admin_kb, users_keyboard, logs_pagination_kb, PAGE_SIZE
 
 admin_router = Router()
 
-# ==============================
-# Вход в админ-панель
-# ==============================
-@admin_router.message(Command("admin"))
-async def admin_panel(message: types.Message):
-    user_id = message.from_user.id
+# === Вход в админку с проверкой прав ===
+@admin_router.callback_query(lambda c: c.data == "admin_panel")
+async def admin_panel(cb: types.CallbackQuery):
+    user_id = cb.from_user.id
 
-    if await is_super_admin(user_id):
-        await message.answer(
-            "Привет, супер-админ! Выберите действие 👇",
-            reply_markup=super_admin_kb
-        )
-        await log_action(user_id, "Открыл панель супер-админа")
-    elif await is_admin(user_id):
-        await message.answer(
-            "Привет, админ! Выберите действие 👇",
-            reply_markup=admin_kb
-        )
-        await log_action(user_id, "Открыл панель админа")
+    if await db.is_super_admin(user_id):
+        kb = super_admin_kb()
+        await cb.message.answer("Добро пожаловать, супер-админ!", reply_markup=kb)
     else:
-        await message.answer("У вас нет прав для доступа к админ-панели")
-        await log_action(user_id, "Попытка доступа к админ-панели без прав")
+        kb = admin_kb()
+        await cb.message.answer("Добро пожаловать в админку!", reply_markup=kb)
 
-# ==============================
-# Обработчик кнопок админа и супер-админа
-# ==============================
-@admin_router.message(lambda message: message.text in ["📜 Просмотр логов", "➕ Добавить админа", "➖ Удалить админа", "⬅️ Назад"])
-async def admin_actions(message: types.Message):
-    user_id = message.from_user.id
-    text = message.text
+    # Скрываем главное меню
+    await cb.message.edit_reply_markup(None)
+    await cb.answer()
 
-    # Просмотр логов
-    if text == "📜 Просмотр логов":
-        logs = await get_user_logs(limit=10)
-        if logs:
-            log_text = "\n".join([f"{log['timestamp']} — User {log['user_id']}: {log['action']}" for log in logs])
-        else:
-            log_text = "Логи пусты"
-        await message.answer(log_text)
-        await log_action(user_id, "Просмотрел логи")
 
-    # Добавить админа (только супер-админ)
-    elif text == "➕ Добавить админа":
-        if await is_super_admin(user_id):
-            await message.answer("Введите ID пользователя для добавления админом:")
-            await log_action(user_id, "Начал добавление нового админа")
-        else:
-            await message.answer("Только супер-админ может добавлять админов")
-            await log_action(user_id, "Попытка добавить админа без прав")
+# === Выход из админки ===
+@admin_router.callback_query(lambda c: c.data == "exit_admin" or c.data == "exit_super_admin")
+async def exit_admin(cb: types.CallbackQuery):
+    await cb.message.delete()
+    from kbds.admin_reply import main_menu_kb
+    await cb.message.answer("Главное меню 👇", reply_markup=main_menu_kb())
+    await cb.answer()
 
-    # Удалить админа (только супер-админ)
-    elif text == "➖ Удалить админа":
-        if await is_super_admin(user_id):
-            await message.answer("Введите ID пользователя для удаления из админов:")
-            await log_action(user_id, "Начал удаление админа")
-        else:
-            await message.answer("Только супер-админ может удалять админов")
-            await log_action(user_id, "Попытка удалить админа без прав")
 
-    # Назад
-    elif text == "⬅️ Назад":
-        await message.answer("Вы вернулись в главное меню 👇")
-        await log_action(user_id, "Нажал Назад в админ-панели")
+# === Просмотр пользователей для логов ===
+@admin_router.callback_query(lambda c: c.data == "view_logs" or c.data == "view_all_logs")
+async def view_users_logs(cb: types.CallbackQuery):
+    # Получаем список пользователей
+    async with db.aiosqlite.connect(db.DB_PATH) as conn:
+        conn.row_factory = db.aiosqlite.Row
+        async with conn.execute("SELECT user_id, username FROM users ORDER BY user_id") as cursor:
+            users = await cursor.fetchall()
+            users = [dict(u) for u in users]
+
+    if not users:
+        await cb.message.answer("Пользователей нет.")
+        return
+
+    kb = users_keyboard(users)
+    await cb.message.answer("Выберите пользователя для просмотра логов:", reply_markup=kb)
+    await cb.answer()
+
+
+# === Показ логов конкретного пользователя (первая страница) ===
+@admin_router.callback_query(lambda c: c.data.startswith("showlog:"))
+async def show_user_logs(cb: types.CallbackQuery):
+    user_id = int(cb.data.split(":")[1])
+    await send_log_page(cb.message, user_id, page=1)
+
+
+# === Пагинация логов ===
+@admin_router.callback_query(lambda c: c.data.startswith("logs_page_"))
+async def paginate_logs(cb: types.CallbackQuery):
+    page = int(cb.data.split("_")[-1])
+    # user_id берём из текста сообщения: предполагаем, что первая строка вида "Действия пользователя {user_id}"
+    first_line = cb.message.text.splitlines()[0]
+    user_id = int(first_line.split()[2])
+    await send_log_page(cb.message, user_id, page)
+
+
+# === Выход из просмотра логов ===
+@admin_router.callback_query(lambda c: c.data == "exit_logs")
+async def exit_logs(cb: types.CallbackQuery):
+    await cb.message.delete()
+    await cb.answer("Вы вышли из просмотра логов.")
+
+
+# === Функция отправки страницы логов ===
+async def send_log_page(message: types.Message, user_id: int, page: int):
+    logs = await db.get_user_logs(limit=1000)  # берём все логи
+    logs = [log for log in logs if log["user_id"] == user_id]
+
+    if not logs:
+        await message.edit_text("Действий пользователя нет.")
+        return
+
+    # Пагинация
+    total_pages = (len(logs) - 1) // PAGE_SIZE + 1
+    start = (page - 1) * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_logs = logs[start:end]
+
+    text = f"Действия пользователя {user_id} — страница {page}/{total_pages}:\n\n"
+    for log in page_logs:
+        text += f"{log['timestamp']}: {log['action']}\n"
+
+    kb = logs_pagination_kb(page, total_pages)
+    await message.edit_text(text, reply_markup=kb)
