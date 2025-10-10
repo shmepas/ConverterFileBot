@@ -9,6 +9,7 @@ from data_base.db import (
     is_admin, is_super_admin, add_admin, remove_admin
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+import html
 
 user_privatka_router = Router()
 user_privatka_router.message.filter(ChatTypeFilter(["private"]))
@@ -132,18 +133,16 @@ async def back_handler(message: types.Message, state: FSMContext):
 # ------------------------------
 # Основной обработчик кнопок и FSM для админов
 # ------------------------------
-@user_privatka_router.message(F.text)
+@user_privatka_router.message(F.text | F.sticker | F.photo | F.document | F.video)
 async def keyboard_handler(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    text = message.text.strip()
+    text_lower = message.text.lower() if message.text else ""
     current_state = await state.get_state()
 
-    # ------------------------------
     # FSM: добавление админа
-    # ------------------------------
     if current_state == MenuStates.add_admin_wait_id.state:
         try:
-            new_admin_id = int(text)
+            new_admin_id = int(message.text)
             if await is_super_admin(new_admin_id):
                 await message.answer("❌ Нельзя добавить супер-админа в обычные админы.")
             else:
@@ -158,12 +157,10 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
         await message.answer("Главное меню 👇", reply_markup=kb)
         return
 
-    # ------------------------------
     # FSM: удаление админа
-    # ------------------------------
     if current_state == MenuStates.remove_admin_wait_id.state:
         try:
-            remove_id = int(text)
+            remove_id = int(message.text)
             if await is_super_admin(remove_id):
                 await message.answer("❌ Нельзя удалить супер-админа!")
             elif not await is_admin(remove_id):
@@ -180,10 +177,7 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
         await message.answer("Главное меню 👇", reply_markup=kb)
         return
 
-    # ------------------------------
-    # Кнопки основного меню
-    # ------------------------------
-    text_lower = text.lower()
+    # Основные кнопки меню
     if text_lower in ["меню"]:
         kb = await build_dynamic_keyboard(user_id)
         await state.set_state(MenuStates.main)
@@ -211,9 +205,7 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
         await message.answer(f"Ваша роль: {role}")
         return
 
-    # ------------------------------
     # Админка
-    # ------------------------------
     if await is_admin(user_id) or await is_super_admin(user_id):
         if text_lower == "админка":
             kb = await build_dynamic_keyboard(user_id, admin_open=True)
@@ -228,7 +220,7 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
             if not logs:
                 await message.answer("📭 Логи пока пусты.")
                 return
-            text_lines = [f"👤 <b>{log['user_id']}</b>\n🕓 {log['timestamp']}\n➡️ {log['action']}\n──────────────" for log in logs]
+            text_lines = [f"👤 <b>{log['user_id']}</b>\n🕓 {log['timestamp']}\n➡️ {html.escape(log['action'])}\n──────────────" for log in logs]
             await message.answer(f"📜 <b>Последние действия пользователей:</b>\n\n" + "\n".join(text_lines), parse_mode="HTML")
             return
         if text_lower == "➕ добавить админа" and await is_super_admin(user_id):
@@ -240,7 +232,5 @@ async def keyboard_handler(message: types.Message, state: FSMContext):
             await message.answer("Введите Telegram ID админа для удаления:")
             return
 
-    # ------------------------------
     # Неизвестная кнопка
-    # ------------------------------
     await message.answer("Я не совсем понял твоё сообщение 😅\nПопробуй одну из кнопок")

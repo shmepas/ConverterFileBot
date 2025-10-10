@@ -17,7 +17,7 @@ def admin_kb():
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("📜 Просмотреть логи", callback_data="view_logs"),
-        InlineKeyboardButton("⬅️ Выйти из админки", callback_data="exit_admin")
+        InlineKeyboardButton("⬅️ Закрыть админку", callback_data="close_admin")
     )
     return kb
 
@@ -29,7 +29,7 @@ def super_admin_kb():
         InlineKeyboardButton("➕ Добавить админа", callback_data="add_admin"),
         InlineKeyboardButton("➖ Удалить админа", callback_data="remove_admin"),
         InlineKeyboardButton("⚙️ Настройки системы", callback_data="system_settings"),
-        InlineKeyboardButton("⬅️ Выйти из супер-админки", callback_data="exit_super_admin")
+        InlineKeyboardButton("⬅️ Закрыть админку", callback_data="close_admin")
     )
     return kb
 
@@ -49,7 +49,7 @@ def logs_pagination_kb(page: int, total_pages: int):
     kb.add(InlineKeyboardButton("⬅️ Выйти из логов", callback_data="exit_logs"))
     return kb
 
-# === Клавиатура для выбора пользователя из списка ===
+# === Клавиатура для выбора пользователя для логов ===
 def users_keyboard(users: list):
     """
     users: список словарей с ключами 'user_id' и 'username'
@@ -58,4 +58,20 @@ def users_keyboard(users: list):
     for user in users:
         display_name = user["username"] or f"User {user['user_id']}"
         kb.add(InlineKeyboardButton(display_name, callback_data=f"showlog:{user['user_id']}"))
+    return kb
+
+# === Клавиатура для выбора пользователей при добавлении/удалении админа (с кнопкой Отмена) ===
+def users_for_admin_kb(users: list[dict]):
+    kb = InlineKeyboardMarkup(row_width=1)
+    for user in users:
+        status = "➕" if not user["is_admin"] else "➖"
+        display_name = user.get("username") or f"User {user['id']}"
+        kb.add(
+            InlineKeyboardButton(
+                text=f"{display_name} {status}",
+                callback_data=f"toggle_admin:{user['id']}"
+            )
+        )
+    # Кнопка "Отмена"
+    kb.add(InlineKeyboardButton("⬅️ Отмена", callback_data="cancel_add_admin"))
     return kb
