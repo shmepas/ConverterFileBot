@@ -1,15 +1,12 @@
 import aiosqlite
 from datetime import datetime
 import os
+import sqlite3
 
 DB_PATH = "data_base/bot_database.db"
 
-# ==============================
-# Инициализация базы
-# ==============================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # Таблица пользователей с полем is_admin
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -20,7 +17,6 @@ async def init_db():
             is_admin INTEGER DEFAULT 0
         )
         """)
-        # Таблица действий пользователей (логи)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS user_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,18 +26,26 @@ async def init_db():
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
         """)
-        # Таблица супер-админов
         await db.execute("""
         CREATE TABLE IF NOT EXISTS super_admin (
             user_id INTEGER PRIMARY KEY,
             added_at TEXT
         )
         """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount REAL,
+            type TEXT,
+            description TEXT,
+            date TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+        """)
+
         await db.commit()
 
-# ==============================
-# Пользователи
-# ==============================
 async def add_user(user_id: int, username: str, first_name: str, last_name: str):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -53,12 +57,8 @@ async def add_user(user_id: int, username: str, first_name: str, last_name: str)
             """, (user_id, username, first_name, last_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             await db.commit()
 
-# ==============================
-# Логирование действий
-# ==============================
 async def log_action(user_id: int, action: str, username: str = None, first_name: str = None, last_name: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Добавляем пользователя, если его нет
         async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
             exists = await cursor.fetchone()
         if not exists and (username or first_name or last_name):
@@ -67,28 +67,18 @@ async def log_action(user_id: int, action: str, username: str = None, first_name
                 VALUES (?, ?, ?, ?, ?)
             """, (user_id, username, first_name, last_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-        # Логируем действие
         await db.execute("""
             INSERT INTO user_actions (user_id, action, timestamp)
             VALUES (?, ?, ?)
         """, (user_id, action, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         await db.commit()
 
-# ==============================
-# Логирование системных событий (запуск/остановка/перезапуск)
-# ==============================
 async def log_system_event(action: str):
-    """
-    Логирует события системы (user_id=0), добавляет PID и timestamp.
-    """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     pid = os.getpid()
     full_action = f"{action} | PID: {pid} | {timestamp}"
     await log_action(user_id=0, action=full_action)
 
-# ==============================
-# Получение логов
-# ==============================
 async def get_user_logs(limit: int = 50):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -99,9 +89,6 @@ async def get_user_logs(limit: int = 50):
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-# ==============================
-# Админы через поле is_admin в users
-# ==============================
 async def is_admin(user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -118,9 +105,6 @@ async def remove_admin(user_id: int):
         await db.execute("UPDATE users SET is_admin = 0 WHERE user_id = ?", (user_id,))
         await db.commit()
 
-# ==============================
-# Супер-админы
-# ==============================
 async def init_super_admin(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM super_admin WHERE user_id = ?", (user_id,)) as cursor:
@@ -138,9 +122,6 @@ async def is_super_admin(user_id: int) -> bool:
             result = await cursor.fetchone()
         return result is not None
 
-# ==============================
-# Получение всех пользователей
-# ==============================
 async def get_all_users():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -148,8 +129,31 @@ async def get_all_users():
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-# ==============================
-# Автоинициализация базы при импорте
-# ==============================
+# -----------------------------
+# Платежи
+# -----------------------------
+async def add_payment(user_id: int, amount: float, payment_type: str, description: str):
+    """Добавляет запись о платеже (асинхронно)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO payments (user_id, amount, type, description, date)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, amount, payment_type, description, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        await db.commit()
+
+async def get_user_payments(user_id: int, limit: int = 50):
+    """Возвращает последние платежи пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT amount, type, description, date FROM payments WHERE user_id = ? ORDER BY date DESC LIMIT ?",
+            (user_id, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+
+
 import asyncio
 asyncio.get_event_loop().run_until_complete(init_db())

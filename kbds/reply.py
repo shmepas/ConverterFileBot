@@ -1,4 +1,4 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 # ==============================
@@ -7,51 +7,47 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 del_kb = ReplyKeyboardRemove()
 
 # ==============================
-# Стартовая клавиатура (вариант 1)
+# Главное меню
 # ==============================
-start_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-            KeyboardButton(text="Меню"),
-            KeyboardButton(text="О боте")
+def main_menu_kb():
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Меню"), KeyboardButton(text="О боте")],
+            [KeyboardButton(text="Вариант оплаты"), KeyboardButton(text="Выбор формата")],
+            [KeyboardButton(text="💳 Платежи")]
         ],
-        [
-            KeyboardButton(text="Вариант оплаты"),
-            KeyboardButton(text="Выбор формата")
-        ]
-    ],
-    resize_keyboard=True,
-    input_field_placeholder='Что вас интересует?'
-)
+        resize_keyboard=True
+    )
+    return kb
 
 # ==============================
-# Стартовая клавиатура (вариант 2) с ReplyKeyboardBuilder
+# Кнопки для работы с файлами
 # ==============================
-start_kb2 = ReplyKeyboardBuilder()
-start_kb2.add(
-    KeyboardButton(text="Меню"),
-    KeyboardButton(text="О боте"),
-    KeyboardButton(text="Вариант оплаты"),
-    KeyboardButton(text="Выбор формата")
-)
-start_kb2.adjust(2, 2)  # 2 колонки, 2 ряда
-
-# ==============================
-# Стартовая клавиатура (вариант 3) с дополнительной кнопкой "Платежи"
-# ==============================
-start_kb3 = ReplyKeyboardBuilder()
-start_kb3.add(
-    KeyboardButton(text="Меню"),
-    KeyboardButton(text="О боте"),
-    KeyboardButton(text="Вариант оплаты"),
-    KeyboardButton(text="Выбор формата")
-)
-start_kb3.row(KeyboardButton(text="Платежи"))  # отдельная строка
-start_kb3.adjust(2)  # выравнивание основных кнопок по 2
+def file_menu_kb():
+    kb = ReplyKeyboardBuilder()
+    kb.add(
+        KeyboardButton(text="Отправить файл"),
+        KeyboardButton(text="Выбор формата")
+    )
+    kb.adjust(2)
+    return kb.as_markup(resize_keyboard=True)
 
 # ==============================
 # Кнопка "Назад"
 # ==============================
-back_kb = ReplyKeyboardBuilder()
-back_kb.add(KeyboardButton(text="⬅️ Назад"))
-back_kb.adjust(1)
+def back_kb():
+    kb = ReplyKeyboardBuilder()
+    kb.add(KeyboardButton(text="⬅️ Назад"))
+    kb.adjust(1)
+    return kb.as_markup(resize_keyboard=True)
+
+# ==============================
+# Инлайн-кнопки для выбора формата конвертации
+# ==============================
+def format_choice_kb():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📄 PDF → ZIP", callback_data="pdf_zip")],
+        [InlineKeyboardButton(text="🖼 JPG → PNG", callback_data="jpg_png")],
+        [InlineKeyboardButton(text="🎥 MP4 → MP3", callback_data="mp4_mp3")]
+    ])
+    return kb

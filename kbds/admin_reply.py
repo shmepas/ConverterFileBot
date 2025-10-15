@@ -16,7 +16,7 @@ def main_menu_kb():
 def admin_kb():
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
-        InlineKeyboardButton("📜 Просмотреть логи", callback_data="view_logs"),
+        InlineKeyboardButton("📜 Просмотр логов", callback_data="view_logs"),
         InlineKeyboardButton("⬅️ Закрыть админку", callback_data="close_admin")
     )
     return kb
