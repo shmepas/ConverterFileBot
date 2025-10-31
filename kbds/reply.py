@@ -14,7 +14,8 @@ def main_menu_kb():
         keyboard=[
             [KeyboardButton(text="Меню"), KeyboardButton(text="О боте")],
             [KeyboardButton(text="Вариант оплаты"), KeyboardButton(text="Выбор формата")],
-            [KeyboardButton(text="💳 Платежи")]
+            [KeyboardButton(text="💳 Платежи")],
+            [KeyboardButton(text="🎞 Форматы")],
         ],
         resize_keyboard=True
     )
@@ -44,10 +45,13 @@ def back_kb():
 # ==============================
 # Инлайн-кнопки для выбора формата конвертации
 # ==============================
-def format_choice_kb():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📄 PDF → ZIP", callback_data="pdf_zip")],
-        [InlineKeyboardButton(text="🖼 JPG → PNG", callback_data="jpg_png")],
-        [InlineKeyboardButton(text="🎥 MP4 → MP3", callback_data="mp4_mp3")]
-    ])
+def format_choice_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="PDF → PNG"), KeyboardButton(text="PDF → ZIP")],
+            [KeyboardButton(text="MP3"), KeyboardButton(text="MP4"), KeyboardButton(text="GIF")],
+            [KeyboardButton(text="⬅️ Назад в меню")]
+        ],
+        resize_keyboard=True
+    )
     return kb

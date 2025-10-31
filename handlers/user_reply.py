@@ -112,7 +112,7 @@ async def show_payments_handler(message: types.Message):
 async def testpay_cmd(message: types.Message):
     # добавит тестовую запись в payments
     try:
-        await db.add_payment(message.from_user.id, 2500, "Пополнение", "Тестовый платёж")
+        await db.add_payment(message.from_user.id, 1957000, "Списание", "Тестовый платёж")
         await message.answer("✅ Тестовый платёж добавлен.")
     except Exception as e:
         await message.answer("❌ Ошибка при добавлении тестового платежа.")

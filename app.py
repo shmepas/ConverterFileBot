@@ -14,6 +14,7 @@ from handlers.user_privatka import user_privatka_router
 from handlers.adminka import admin_router
 from handlers.user_reply import user_reply_router
 from middlewares.logging_middleware import LoggingMiddleware
+from handlers.formats import formats_router
 
 load_dotenv(find_dotenv())
 
@@ -34,6 +35,7 @@ dp.update.middleware(LoggingMiddleware())
 # --------------------------
 dp.include_router(user_privatka_router)
 dp.include_router(admin_router)
+dp.include_router(formats_router)
 dp.include_router(user_reply_router)
 
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID"))

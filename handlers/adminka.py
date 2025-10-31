@@ -1,10 +1,20 @@
 import os
+import tempfile
+import traceback
+import zipfile
+try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None  # Безопасно, если не установлен
+
 from aiogram import types, Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from moviepy.editor import VideoFileClip
+
 
 from data_base.db import (
     log_action, is_admin, is_super_admin,
@@ -15,7 +25,7 @@ admin_router = Router()
 PAGE_SIZE = 20
 
 # ------------------------------
-# FSM состояния для админки
+# FSM состояния
 # ------------------------------
 class AdminStates(StatesGroup):
     main = State()
@@ -23,6 +33,10 @@ class AdminStates(StatesGroup):
     remove_admin_wait_id = State()
     view_logs_page = State()
     view_payments_page = State()
+
+class FormatStates(StatesGroup):
+    waiting_format = State()
+    waiting_file = State()
 
 # ------------------------------
 # Главная клавиатура админа
@@ -34,15 +48,29 @@ async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
             KeyboardButton(text="📜 Просмотр логов"),
             KeyboardButton(text="➕ Добавить админа"),
             KeyboardButton(text="➖ Удалить админа"),
-            KeyboardButton(text="💳 Платежи")
+            KeyboardButton(text="💳 Платежи"),
+            KeyboardButton(text="🎞 Форматы")
         )
     elif await is_admin(user_id):
         kb_builder.row(
             KeyboardButton(text="📜 Просмотр логов"),
-            KeyboardButton(text="💳 Платежи")
+            KeyboardButton(text="💳 Платежи"),
+            KeyboardButton(text="🎞 Форматы")
         )
     kb_builder.row(KeyboardButton(text="⬅️ Закрыть админку"))
     return kb_builder.as_markup(resize_keyboard=True)
+
+# ------------------------------
+# Клавиатура выбора формата
+# ------------------------------
+def formats_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="MP3"), KeyboardButton(text="MP4"), KeyboardButton(text="GIF")],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True
+    )
 
 # ------------------------------
 # Открытие админки
@@ -81,7 +109,7 @@ async def add_admin_start(message: types.Message, state: FSMContext):
     await state.set_state(AdminStates.add_admin_wait_id)
     await message.answer("Введите ID пользователя для добавления в админы:")
 
-@admin_router.message(F.text, AdminStates.add_admin_wait_id)
+@admin_router.message(AdminStates.add_admin_wait_id, F.text)
 async def add_admin_confirm(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text)
@@ -106,7 +134,7 @@ async def remove_admin_start(message: types.Message, state: FSMContext):
     await state.set_state(AdminStates.remove_admin_wait_id)
     await message.answer("Введите ID пользователя для удаления из админов:")
 
-@admin_router.message(F.text, AdminStates.remove_admin_wait_id)
+@admin_router.message(AdminStates.remove_admin_wait_id, F.text)
 async def remove_admin_confirm(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text)
@@ -132,7 +160,6 @@ async def view_logs_start(message: types.Message, state: FSMContext):
 async def send_logs_page(message: types.Message, state: FSMContext):
     data = await state.get_data()
     page = data.get("page", 1)
-
     logs = await get_user_logs(limit=500)
     if not logs:
         await message.answer("📭 Логов пока нет.")
@@ -146,14 +173,12 @@ async def send_logs_page(message: types.Message, state: FSMContext):
     end = start + PAGE_SIZE
     page_logs = logs[start:end]
 
-    text_lines = []
+    text = f"📜 Логи — страница {page}/{total_pages}\n\n"
     for log in page_logs:
         uid = log.get("user_id", "")
         ts = log.get("timestamp", "")
         action = log.get("action", "")
-        text_lines.append(f"👤 {uid} | 🕒 {ts}\n➡️ {action}")
-
-    text = f"📜 Логи — страница {page}/{total_pages}\n\n" + "\n\n".join(text_lines)
+        text += f"👤 {uid} | 🕒 {ts}\n➡️ {action}\n\n"
 
     builder = ReplyKeyboardBuilder()
     if page > 1:
@@ -161,9 +186,8 @@ async def send_logs_page(message: types.Message, state: FSMContext):
     if page < total_pages:
         builder.add(KeyboardButton(text="▶️ Далее"))
     builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
-
     kb = builder.as_markup(resize_keyboard=True)
-    await message.answer(text, reply_markup=kb)
+    await message.answer(text.strip(), reply_markup=kb)
     await state.update_data(page=page)
 
 @admin_router.message(AdminStates.view_logs_page)
@@ -171,14 +195,11 @@ async def logs_navigation(message: types.Message, state: FSMContext):
     text = message.text
     data = await state.get_data()
     page = data.get("page", 1)
-
     if text == "⬅️ Назад":
-        page = max(1, page - 1)
-        await state.update_data(page=page)
+        await state.update_data(page=max(1, page - 1))
         await send_logs_page(message, state)
     elif text == "▶️ Далее":
-        page += 1
-        await state.update_data(page=page)
+        await state.update_data(page=page + 1)
         await send_logs_page(message, state)
     elif text == "⬅️ Выйти в главное меню":
         await state.set_state(AdminStates.main)
@@ -199,7 +220,6 @@ async def view_payments_start(message: types.Message, state: FSMContext):
 async def send_payments_page(message: types.Message, state: FSMContext):
     data = await state.get_data()
     page = data.get("page", 1)
-
     payments = await get_user_payments(limit=500)
     if not payments:
         await message.answer("📭 История платежей пока пуста.")
@@ -213,14 +233,9 @@ async def send_payments_page(message: types.Message, state: FSMContext):
     end = start + PAGE_SIZE
     page_payments = payments[start:end]
 
-    text_lines = []
+    text = f"💳 История платежей — страница {page}/{total_pages}\n\n"
     for p in page_payments:
-        uid = p.get("user_id", "")
-        amount = p.get("amount", "")
-        ts = p.get("timestamp", "")
-        text_lines.append(f"👤 {uid} | 💰 {amount} | 🕒 {ts}")
-
-    text = f"💳 История платежей — страница {page}/{total_pages}\n\n" + "\n\n".join(text_lines)
+        text += f"👤 {p.get('user_id')} | 💰 {p.get('amount')} | 🕒 {p.get('timestamp')}\n\n"
 
     builder = ReplyKeyboardBuilder()
     if page > 1:
@@ -228,9 +243,8 @@ async def send_payments_page(message: types.Message, state: FSMContext):
     if page < total_pages:
         builder.add(KeyboardButton(text="▶️ Далее"))
     builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
-
     kb = builder.as_markup(resize_keyboard=True)
-    await message.answer(text, reply_markup=kb)
+    await message.answer(text.strip(), reply_markup=kb)
     await state.update_data(page=page)
 
 @admin_router.message(AdminStates.view_payments_page)
@@ -238,14 +252,11 @@ async def payments_navigation(message: types.Message, state: FSMContext):
     text = message.text
     data = await state.get_data()
     page = data.get("page", 1)
-
     if text == "⬅️ Назад":
-        page = max(1, page - 1)
-        await state.update_data(page=page)
+        await state.update_data(page=max(1, page - 1))
         await send_payments_page(message, state)
     elif text == "▶️ Далее":
-        page += 1
-        await state.update_data(page=page)
+        await state.update_data(page=page + 1)
         await send_payments_page(message, state)
     elif text == "⬅️ Выйти в главное меню":
         await state.set_state(AdminStates.main)
@@ -253,6 +264,77 @@ async def payments_navigation(message: types.Message, state: FSMContext):
         await message.answer("Возврат в главное меню админки 👇", reply_markup=kb)
     else:
         await message.answer("❌ Неизвестная команда. Используйте кнопки ниже.")
+
+# ------------------------------
+# Работа с форматами
+# ------------------------------
+@admin_router.message(F.text == "🎞 Форматы")
+async def choose_format(message: types.Message, state: FSMContext):
+    await state.set_state(FormatStates.waiting_format)
+    await message.answer("Выберите формат для конвертации 👇", reply_markup=formats_kb())
+
+@admin_router.message(FormatStates.waiting_format, F.text.in_({"MP3", "MP4", "GIF"}))
+async def format_selected(message: types.Message, state: FSMContext):
+    await state.update_data(selected_format=message.text)
+    await state.set_state(FormatStates.waiting_file)
+    await message.answer(
+        f"📁 Отправьте файл для конвертации в {message.text} формат.\n\n"
+        "Когда закончите — нажмите ⬅️ Назад.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Назад")]],
+            resize_keyboard=True
+        )
+    )
+
+@admin_router.message(FormatStates.waiting_file, F.content_type.in_({"document", "video", "audio"}))
+async def convert_file(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    fmt = data.get("selected_format")
+    file = message.document or message.video or message.audio
+    if not fmt:
+        await message.answer("⚠️ Сначала выберите формат.")
+        return
+
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, file.file_name)
+    await file.download(destination_file=file_path)
+    out_file = os.path.join(temp_dir, f"{os.path.splitext(file.file_name)[0]}.{fmt.lower()}")
+
+    try:
+        if fmt == "MP3":
+            if file_path.lower().endswith((".mp3", ".wav", ".ogg")):
+                audio = AudioSegment.from_file(file_path)
+                audio.export(out_file, format="mp3")
+            else:
+                clip = VideoFileClip(file_path)
+                clip.audio.write_audiofile(out_file)
+                clip.close()
+        elif fmt == "MP4":
+            clip = VideoFileClip(file_path)
+            clip.write_videofile(out_file, codec="libx264")
+            clip.close()
+        elif fmt == "GIF":
+            clip = VideoFileClip(file_path)
+            clip.write_gif(out_file)
+            clip.close()
+
+        await message.answer_document(types.FSInputFile(out_file), caption=f"✅ Файл конвертирован в {fmt}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка конвертации:\n<code>{traceback.format_exc()}</code>", parse_mode="HTML")
+    finally:
+        for path in (file_path, out_file):
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+@admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_file)
+@admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_format)
+async def back_from_formats(message: types.Message, state: FSMContext):
+    await state.clear()
+    kb = await admin_main_kb(message.from_user.id)
+    await message.answer("↩️ Возврат в главное меню админки.", reply_markup=kb)
 
 # ------------------------------
 # Закрытие админки
