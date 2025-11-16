@@ -1,5 +1,6 @@
 import os
 import tempfile
+from tkinter import Image
 import traceback
 import shutil
 import zipfile
