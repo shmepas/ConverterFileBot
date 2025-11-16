@@ -304,11 +304,6 @@ async def payments_navigation(message: types.Message, state: FSMContext):
 @admin_router.message(F.text == "🎞 Форматы")
 async def choose_format(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    # 🔒 Проверка доступа
-    if not (await is_admin(user_id) or await is_super_admin(user_id)):
-        await message.answer("🚫 У вас нет доступа к этому разделу.")
-        return
-
     await state.set_state(FormatStates.waiting_format)
     await answer_editable(message, "Выберите формат для конвертации 👇", reply_markup=formats_kb())
 
@@ -336,7 +331,7 @@ async def convert_file(message: types.Message, state: FSMContext):
         return
 
     # Максимальный размер входящего файла для Telegram: 20 МБ
-    MAX_INPUT_SIZE = 50 * 1024 * 1024
+    MAX_INPUT_SIZE = 20 * 1024 * 1024
 
     # Проверяем размер входящего файла (супер-админам — без ограничения)
     file_size = getattr(file_obj, "file_size", 0)
