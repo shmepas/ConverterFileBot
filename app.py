@@ -105,3 +105,4 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         # Корректное завершение при Ctrl+C или сигналах
         pass
+

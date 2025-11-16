@@ -1,4 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Router, F
+from aiogram.types import CallbackQuery
+from reply import get_main_menu_kb
 
 # === Размер страницы для пагинации логов ===
 PAGE_SIZE = 20
@@ -75,3 +78,13 @@ def users_for_admin_kb(users: list[dict]):
     # Кнопка "Отмена"
     kb.add(InlineKeyboardButton("⬅️ Отмена", callback_data="cancel_add_admin"))
     return kb
+
+
+admin_router = Router()
+
+@admin_router.callback_query(F.data == "close_admin")
+async def close_admin_panel(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    kb = await get_main_menu_kb(user_id)
+    await callback.message.edit_text("Админка закрыта. Возврат в главное меню.", reply_markup=kb)
+    await callback.answer()

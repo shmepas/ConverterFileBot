@@ -2,6 +2,10 @@ import os
 import tempfile
 import traceback
 import zipfile
+import asyncio  # добавлен для асинхронного вызова ffmpeg
+import subprocess
+from kbds.reply import main_menu_kb
+
 try:
     import fitz  # PyMuPDF
 except Exception:
@@ -15,7 +19,6 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from moviepy.editor import VideoFileClip
 
-
 from data_base.db import (
     log_action, is_admin, is_super_admin,
     add_admin, remove_admin, get_user_logs, get_user_payments
@@ -24,6 +27,9 @@ from data_base.db import (
 admin_router = Router()
 PAGE_SIZE = 20
 
+# ------------------------------
+# 💉 FIX: Клавиатура обычного пользователя
+# ------------------------------
 # ------------------------------
 # FSM состояния
 # ------------------------------
@@ -71,6 +77,29 @@ def formats_kb() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True
     )
+
+# ------------------------------
+# Асинхронная функция для конвертации аудио с помощью ffmpeg
+# ------------------------------
+async def convert_audio_ffmpeg_async(input_path: str, output_path: str):
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-vn",
+        "-ar", "44100",
+        "-ac", "2",
+        "-b:a", "192k",
+        output_path
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(f"ffmpeg error: {stderr.decode()}")
 
 # ------------------------------
 # Открытие админки
@@ -270,6 +299,12 @@ async def payments_navigation(message: types.Message, state: FSMContext):
 # ------------------------------
 @admin_router.message(F.text == "🎞 Форматы")
 async def choose_format(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    # 🔒 Проверка доступа
+    if not (await is_admin(user_id) or await is_super_admin(user_id)):
+        await message.answer("🚫 У вас нет доступа к этому разделу.")
+        return
+
     await state.set_state(FormatStates.waiting_format)
     await message.answer("Выберите формат для конвертации 👇", reply_markup=formats_kb())
 
@@ -303,24 +338,27 @@ async def convert_file(message: types.Message, state: FSMContext):
     try:
         if fmt == "MP3":
             if file_path.lower().endswith((".mp3", ".wav", ".ogg")):
-                audio = AudioSegment.from_file(file_path)
-                audio.export(out_file, format="mp3")
+                await convert_audio_ffmpeg_async(file_path, out_file)
             else:
                 clip = VideoFileClip(file_path)
                 clip.audio.write_audiofile(out_file)
                 clip.close()
+
         elif fmt == "MP4":
             clip = VideoFileClip(file_path)
             clip.write_videofile(out_file, codec="libx264")
             clip.close()
+
         elif fmt == "GIF":
             clip = VideoFileClip(file_path)
             clip.write_gif(out_file)
             clip.close()
 
         await message.answer_document(types.FSInputFile(out_file), caption=f"✅ Файл конвертирован в {fmt}")
-    except Exception as e:
+
+    except Exception:
         await message.answer(f"❌ Ошибка конвертации:\n<code>{traceback.format_exc()}</code>", parse_mode="HTML")
+
     finally:
         for path in (file_path, out_file):
             if os.path.exists(path):
@@ -333,14 +371,25 @@ async def convert_file(message: types.Message, state: FSMContext):
 @admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_format)
 async def back_from_formats(message: types.Message, state: FSMContext):
     await state.clear()
-    kb = await admin_main_kb(message.from_user.id)
-    await message.answer("↩️ Возврат в главное меню админки.", reply_markup=kb)
+    user_id = message.from_user.id
+
+    # 🔍 Проверяем, админ ли пользователь
+    if await is_admin(user_id) or await is_super_admin(user_id):
+        kb = await admin_main_kb(user_id)
+        text = "↩️ Возврат в главное меню админки."
+    else:
+        # 💡 Обычному пользователю — его клавиатура
+        kb = main_menu_kb()
+        text = "↩️ Возврат в главное меню."
+
+    await message.answer(text, reply_markup=kb)
 
 # ------------------------------
-# Закрытие админки
+# 💉 FIX: Закрытие админки (исправлено)
 # ------------------------------
 @admin_router.message(F.text == "⬅️ Закрыть админку")
 async def close_admin(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Админка закрыта ✅", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Админка закрыта ✅", reply_markup=main_menu_kb())
     await log_action(message.from_user.id, "Закрыл админку")
+

@@ -23,7 +23,7 @@ async def send_file_prompt(message: types.Message, state: FSMContext):
     await message.answer("📂 Пришлите файл для конвертации.")
 
 # === Выбор формата ===
-@user_reply_router.message(F.text == "Выбор формата")
+@user_reply_router.message(F.text == "🎞 Форматы")
 async def choose_format(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.waiting_format)
     await db.log_action(message.from_user.id, "Открыл выбор формата")

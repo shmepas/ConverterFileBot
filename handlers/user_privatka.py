@@ -40,7 +40,7 @@ async def build_dynamic_keyboard(user_id: int, admin_open: bool = False) -> type
         types.KeyboardButton(text="Меню"),
         types.KeyboardButton(text="О боте"),
         types.KeyboardButton(text="Вариант оплаты"),
-        types.KeyboardButton(text="Выбор формата")
+        types.KeyboardButton(text="🎞 Форматы")
     )
     kb_builder.row(types.KeyboardButton(text="💳 Платежи"))
     kb_builder.row(types.KeyboardButton(text="Моя роль"))
@@ -136,7 +136,7 @@ async def send_file_handler(message: types.Message, state: FSMContext):
 # ------------------------------
 # Выбор формата
 # ------------------------------
-@user_privatka_router.message(F.text.lower() == "выбор формата")
+@user_privatka_router.message(F.text.lower() == "форматы")
 async def choose_format_handler(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.waiting_format)
     await message.answer("Выберите формат конвертации:", reply_markup=reply.format_choice_kb())

@@ -1,0 +1,28 @@
+import sqlite3
+import hashlib
+
+conn = sqlite3.connect('admins.db')
+cur = conn.cursor()
+
+cur.execute('''
+CREATE TABLE IF NOT EXISTS admins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL
+)
+''')
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+# Добавляем одного админа, если его нет
+username = "admin"
+password = "123456"  # замени на свой
+
+cur.execute('SELECT * FROM admins WHERE username = ?', (username,))
+if not cur.fetchone():
+    cur.execute('INSERT INTO admins (username, password_hash) VALUES (?, ?)', (username, hash_password(password)))
+    print("Admin user created")
+
+conn.commit()
+conn.close()

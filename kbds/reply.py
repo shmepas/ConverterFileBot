@@ -1,5 +1,7 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from data_base.db import is_admin
+
 
 # ==============================
 # Удаление клавиатуры
@@ -55,3 +57,25 @@ def format_choice_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
     return kb
+
+# ==============================
+# Новая клавиатура для конвертации форматов
+# ==============================
+def format_converter():
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎞 Видео"), KeyboardButton(text="🎵 Аудио")],
+            [KeyboardButton(text="📄 PDF → Word")],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True
+    )
+    return kb
+
+
+async def get_main_menu_kb(user_id: int):
+    from admin_reply import admin_kb
+    if await is_admin(user_id):
+        return admin_kb()
+    else:
+        return main_menu_kb()
