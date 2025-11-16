@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
-from reply import get_main_menu_kb
+from .reply import get_main_menu_kb
 
 # === Размер страницы для пагинации логов ===
 PAGE_SIZE = 20

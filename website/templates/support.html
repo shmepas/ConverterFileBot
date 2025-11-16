@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Поддержка — Бот-конвертер</title>
+    <link rel="icon" href="/favicon.ico" />
+    <style>
+        body{font-family: Arial, sans-serif; background:#121212;color:#fff;padding:40px}
+        .container{max-width:900px;margin:0 auto}
+        a{color:#2a9df4}
+        header{display:flex;justify-content:flex-end}
+    </style>
+</head>
+<body>
+    <header>
+      {% if admin_logged_in %}
+        <div>
+          Привет, {{ session.admin_username }} |
+          <a href="{{ url_for('admin_logout') }}" style="color: #f44336;">Выйти</a>
+        </div>
+      {% else %}
+        <a href="{{ url_for('admin_login') }}">Вход для админов</a>
+      {% endif %}
+    </header>
+
+    <div class="container">
+      <h1>Поддержка</h1>
+      <p>Мы всегда готовы помочь! Ниже — несколько способов получить помощь:</p>
+      <ul>
+        <li><strong>Частые вопросы:</strong> <a href="{{ url_for('faq') }}">FAQ</a> — справочные материалы и быстрые ответы.</li>
+        <li><strong>Чат в Telegram:</strong> Связаться с нашей поддержкой напрямую — <a href="https://t.me/claperonn" target="_blank">Написать в Telegram</a>.</li>
+        <li><strong>Отправить отзыв / ошибку:</strong> <a href="{{ url_for('feedback_page') }}">Форма обратной связи</a> — опишите проблему и приложите логи/файлы.</li>
+      </ul>
+
+      <h2>Рекомендации при обращении</h2>
+      <ul>
+        <li>Опишите шаги, которые привели к проблеме.</li>
+        <li>Укажите формат файла и пример входных данных, если возможно.</li>
+        <li>Если это ошибка конвертации — приложите фрагмент лога или скриншот.</li>
+      </ul>
+
+      <p>Обычно мы отвечаем в течение 24 часов. Спасибо за вашу помощь в улучшении бота!</p>
+
+      <p><a href="{{ url_for('index') }}">← Вернуться на главную</a></p>
+    </div>
+</body>
+</html>

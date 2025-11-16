@@ -61,17 +61,6 @@ async def init_db():
         """)
         await db.commit()
 
-        # Table to keep last bot message per user (to edit/delete and avoid clutter)
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS last_bot_message (
-            user_id INTEGER PRIMARY KEY,
-            chat_id INTEGER,
-            message_id INTEGER,
-            updated_at TEXT
-        )
-        """)
-        await db.commit()
-
 async def add_user(user_id: int, username: str, first_name: str, last_name: str):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -114,28 +103,6 @@ async def get_user_logs(limit: int = 50):
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
-
-
-async def set_last_bot_message(user_id: int, chat_id: int, message_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("REPLACE INTO last_bot_message (user_id, chat_id, message_id, updated_at) VALUES (?, ?, ?, ?)",
-                         (user_id, chat_id, message_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        await db.commit()
-
-
-async def get_last_bot_message(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT chat_id, message_id FROM last_bot_message WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return {'chat_id': row[0], 'message_id': row[1]}
-            return None
-
-
-async def clear_last_bot_message(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM last_bot_message WHERE user_id = ?", (user_id,))
-        await db.commit()
 
 async def is_admin(user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Загрузка больших файлов — Бот-конвертер</title>
+  <link rel="icon" href="/favicon.ico" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      max-width: 600px;
+      width: 100%;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      padding: 40px;
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 10px;
+      font-size: 28px;
+    }
+    .subtitle {
+      color: #999;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      color: #333;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    input[type="text"],
+    input[type="email"],
+    select,
+    textarea {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+      transition: border-color 0.3s;
+    }
+    input[type="text"]:focus,
+    input[type="email"]:focus,
+    select:focus,
+    textarea:focus {
+      outline: none;
+      border-color: #667eea;
+      background: #f9f9f9;
+    }
+    input[type="file"] {
+      display: block;
+      padding: 10px;
+      border: 2px dashed #667eea;
+      border-radius: 8px;
+      cursor: pointer;
+      background: #f5f7ff;
+      color: #667eea;
+      font-weight: 600;
+    }
+    input[type="file"]::file-selector-button {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      margin-right: 10px;
+    }
+    .file-info {
+      color: #999;
+      font-size: 12px;
+      margin-top: 5px;
+    }
+    .button-group {
+      display: flex;
+      gap: 10px;
+      margin-top: 30px;
+    }
+    button,
+    .btn {
+      flex: 1;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      text-decoration: none;
+      display: inline-block;
+      text-align: center;
+    }
+    button[type="submit"] {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    button[type="submit"]:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+    }
+    .btn-cancel {
+      background: #f0f0f0;
+      color: #333;
+    }
+    .btn-cancel:hover {
+      background: #e0e0e0;
+    }
+    .alert {
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+    .alert-info {
+      background: #e3f2fd;
+      color: #1565c0;
+      border-left: 4px solid #1565c0;
+    }
+    .alert-success {
+      background: #e8f5e9;
+      color: #2e7d32;
+      border-left: 4px solid #2e7d32;
+    }
+    .alert-error {
+      background: #ffebee;
+      color: #c62828;
+      border-left: 4px solid #c62828;
+    }
+    .progress {
+      display: none;
+      margin-top: 20px;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 30px;
+      background: #f0f0f0;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+      width: 0%;
+      transition: width 0.3s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📁 Загрузка больших файлов</h1>
+    <p class="subtitle">Загрузите файл для конвертации, который не удалось обработать через бот</p>
+
+    {% if message %}
+      <div class="alert alert-{{ message_type }}">{{ message }}</div>
+    {% endif %}
+
+    <div class="alert alert-info">
+      ✓ Поддерживаются файлы до 500 МБ<br>
+      ✓ Файл будет обработан и доставлен на ваш email<br>
+      ✓ Конфиденциальность: файлы удаляются через 24 часа
+    </div>
+
+    <form method="post" enctype="multipart/form-data" id="uploadForm">
+      <div class="form-group">
+        <label for="email">📧 Ваш email (куда отправить результат)</label>
+        <input type="email" id="email" name="email" required placeholder="example@mail.com" />
+      </div>
+
+      <div class="form-group">
+        <label for="format">🎯 Требуемый формат</label>
+        <select id="format" name="format" required>
+          <option value="">-- Выберите формат --</option>
+          <option value="MP3">MP3 (аудио)</option>
+          <option value="MP4">MP4 (видео)</option>
+          <option value="GIF">GIF (анимация)</option>
+          <option value="TXT">TXT (текст из PDF/ZIP)</option>
+          <option value="PDF">PDF → PNG</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="file">📂 Выберите файл</label>
+        <input type="file" id="file" name="file" required />
+        <div class="file-info">Максимальный размер: 500 МБ</div>
+      </div>
+
+      <div class="form-group">
+        <label for="notes">💬 Дополнительные пожелания (опционально)</label>
+        <textarea id="notes" name="notes" rows="3" placeholder="Например: уменьшить размер видео, повысить качество и т.д."></textarea>
+      </div>
+
+      <div class="progress" id="progress">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill">0%</div>
+        </div>
+      </div>
+
+      <div class="button-group">
+        <button type="submit" id="submitBtn">🚀 Загрузить</button>
+        <a href="/" class="btn btn-cancel">↩️ Вернуться</a>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+
+      const email = document.getElementById('email').value;
+      const format = document.getElementById('format').value;
+      const file = document.getElementById('file').files[0];
+      const notes = document.getElementById('notes').value;
+
+      if (!file) {
+        alert('Пожалуйста, выберите файл');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('email', email);
+      formData.append('format', format);
+      formData.append('file', file);
+      formData.append('notes', notes);
+
+      const submitBtn = document.getElementById('submitBtn');
+      const progressDiv = document.getElementById('progress');
+      const progressFill = document.getElementById('progressFill');
+
+      submitBtn.disabled = true;
+      progressDiv.style.display = 'block';
+
+      try {
+        const xhr = new XMLHttpRequest();
+
+        xhr.upload.addEventListener('progress', function(e) {
+          if (e.lengthComputable) {
+            const percentComplete = (e.loaded / e.total) * 100;
+            progressFill.style.width = percentComplete + '%';
+            progressFill.textContent = Math.round(percentComplete) + '%';
+          }
+        });
+
+        xhr.addEventListener('load', function() {
+          if (xhr.status === 200) {
+            progressDiv.style.display = 'none';
+            submitBtn.disabled = false;
+            alert('✓ Файл успешно загружен! Результат будет отправлен на ваш email.');
+            document.getElementById('uploadForm').reset();
+          } else {
+            progressDiv.style.display = 'none';
+            submitBtn.disabled = false;
+            alert('❌ Ошибка при загрузке: ' + xhr.responseText);
+          }
+        });
+
+        xhr.addEventListener('error', function() {
+          progressDiv.style.display = 'none';
+          submitBtn.disabled = false;
+          alert('❌ Ошибка сетевого соединения');
+        });
+
+        xhr.open('POST', '/upload_large', true);
+        xhr.send(formData);
+      } catch (err) {
+        progressDiv.style.display = 'none';
+        submitBtn.disabled = false;
+        alert('❌ Ошибка: ' + err.message);
+      }
+    });
+  </script>
+</body>
+</html>

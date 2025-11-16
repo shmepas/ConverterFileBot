@@ -1,2 +1,10 @@
 flask
-
+aiosqlite
+pypandoc
+Pillow
+moviepy
+pydub
+pyaudioop
+celery
+redis
+requests

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Обратная связь — админка</title>
+    <style>
+      body{font-family:Arial;background:#121212;color:#fff;padding:20px}
+      table{width:100%;border-collapse:collapse}
+      td,th{padding:8px;border-bottom:1px solid #2a2a2a}
+      th{background:#1a7cd6;color:#fff}
+      a.button{background:#2a9df4;padding:6px 10px;border-radius:6px;color:#fff;text-decoration:none}
+    </style>
+</head>
+<body>
+  <h1>Обратная связь и заявки</h1>
+  <p><a href="{{ url_for('admin_panel') }}">← Вернуться в панель</a></p>
+
+  {% if feedbacks %}
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Имя</th><th>Email</th><th>Сообщение</th><th>Статус</th><th>Дата</th><th>Действия</th></tr>
+    </thead>
+    <tbody>
+      {% for f in feedbacks %}
+        <tr>
+          <td>{{ f.id }}</td>
+          <td>{{ f.name }}</td>
+          <td>{{ f.email }}</td>
+          <td style="max-width:420px;white-space:pre-wrap">{{ f.message }}</td>
+          <td>{{ f.status }}</td>
+          <td>{{ f.created_at }}</td>
+          <td>
+            <form action="{{ url_for('admin_delete_feedback', feedback_id=f.id) }}" method="post" style="display:inline">
+              <button type="submit" style="background:#f44336;color:#fff;padding:6px;border:none;border-radius:8px">Удалить</button>
+            </form>
+            <form action="{{ url_for('admin_mark_feedback', feedback_id=f.id) }}" method="post" style="display:inline">
+              <input type="hidden" name="status" value="handled" />
+              <button type="submit" style="background:#4caf50;color:#fff;padding:6px;border:none;border-radius:8px">Пометить обработанным</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p>Нет сообщений.</p>
+  {% endif %}
+</body>
+</html>

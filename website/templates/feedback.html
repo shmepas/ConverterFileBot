@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Обратная связь — Бот-конвертер</title>
+    <link rel="icon" href="/favicon.ico" />
+    <style>
+        body{font-family: Arial, sans-serif; background:#121212;color:#fff;padding:40px}
+        .container{max-width:800px;margin:0 auto}
+        .card{background:#222;padding:20px;border-radius:12px}
+        input,textarea{width:100%;padding:8px;margin:8px 0;border-radius:8px;background:#333;border:none;color:#fff}
+        button{background:#2a9df4;border:none;color:#fff;padding:12px 18px;border-radius:10px;cursor:pointer}
+        header{display:flex;justify-content:flex-end}
+    </style>
+</head>
+<body>
+    <header>
+      {% if admin_logged_in %}
+        <div>
+          Привет, {{ session.admin_username }} |
+          <a href="{{ url_for('admin_logout') }}" style="color: #f44336;">Выйти</a>
+        </div>
+      {% else %}
+        <a href="{{ url_for('admin_login') }}">Вход для админов</a>
+      {% endif %}
+    </header>
+
+    <div class="container">
+      <h1>Обратная связь</h1>
+      <p>Расскажите, что не работает или дайте предложение — мы читаем всё.</p>
+      <div class="card">
+        <form id="feedbackForm">
+          <label for="name">Имя</label>
+          <input id="name" name="name" required />
+
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" required />
+
+          <label for="message">Сообщение</label>
+          <textarea id="message" name="message" rows="6" required></textarea>
+
+          <button type="submit">Отправить</button>
+        </form>
+        <div id="result" style="margin-top:12px"></div>
+      </div>
+
+      <p style="margin-top:18px"><a href="{{ url_for('support') }}">← Поддержка</a></p>
+    </div>
+
+    <script>
+      const form = document.getElementById('feedbackForm');
+      const result = document.getElementById('result');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        result.textContent = '';
+        const payload = {
+          name: form.name.value.trim(),
+          email: form.email.value.trim(),
+          message: form.message.value.trim()
+        };
+        if (!payload.name || !payload.email || !payload.message) {
+          result.style.color = '#f44336';
+          result.textContent = 'Пожалуйста, заполните все поля.';
+          return;
+        }
+
+        try {
+          const response = await fetch('/api/feedback', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json();
+          if (response.ok) {
+            result.style.color = '#4caf50';
+            result.textContent = 'Спасибо! Ваш отзыв отправлен.';
+            form.reset();
+          } else {
+            result.style.color = '#f44336';
+            result.textContent = data.error || 'Ошибка при отправке';
+          }
+        } catch (err) {
+          result.style.color = '#f44336';
+          result.textContent = 'Ошибка сети.';
+        }
+      });
+    </script>
+</body>
+</html>
