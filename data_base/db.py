@@ -84,20 +84,34 @@ async def add_user(user_id: int, username: str, first_name: str, last_name: str)
             await db.commit()
 
 async def log_action(user_id: int, action: str, username: str = None, first_name: str = None, last_name: str = None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            exists = await cursor.fetchone()
-        if not exists and (username or first_name or last_name):
+    """Логирование действий с улучшенной обработкой ошибок."""
+    # Валидация входных данных
+    if not isinstance(user_id, int) or user_id < 0:
+        return
+    if not action or not isinstance(action, str):
+        return
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Добавляем пользователя если его нет и есть данные
+            if username or first_name or last_name:
+                await add_user(user_id, username or "", first_name or "", last_name or "")
+            
+            # Логируем действие
             await db.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, username, first_name, last_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-
-        await db.execute("""
-            INSERT INTO user_actions (user_id, action, timestamp)
-            VALUES (?, ?, ?)
-        """, (user_id, action, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        await db.commit()
+                INSERT INTO user_actions (user_id, action, timestamp)
+                VALUES (?, ?, ?)
+            """, (user_id, action[:500], datetime.now().strftime("%Y-%m-%d %H:%M:%S")))  # Ограничиваем длину action
+            await db.commit()
+    except Exception as e:
+        # Логируем ошибку в файл, но не прерываем выполнение
+        try:
+            import os
+            os.makedirs("logs", exist_ok=True)
+            with open("logs/db_error.log", "a", encoding="utf-8") as f:
+                f.write(f"DB Error in log_action: {e}\n")
+        except Exception:
+            pass
 
 async def log_system_event(action: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -106,14 +120,30 @@ async def log_system_event(action: str):
     await log_action(user_id=0, action=full_action)
 
 async def get_user_logs(limit: int = 50):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT id, user_id, action, timestamp FROM user_actions ORDER BY id DESC LIMIT ?",
-            (limit,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+    """Получение логов с улучшенной производительностью и валидацией."""
+    # Валидация лимита
+    if not isinstance(limit, int) or limit <= 0 or limit > 1000:
+        limit = 50
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, user_id, action, timestamp FROM user_actions ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+    except Exception as e:
+        # Логируем ошибку, но возвращаем пустой список
+        try:
+            import os
+            os.makedirs("logs", exist_ok=True)
+            with open("logs/db_error.log", "a", encoding="utf-8") as f:
+                f.write(f"DB Error in get_user_logs: {e}\n")
+        except Exception:
+            pass
+        return []
 
 
 async def set_last_bot_message(user_id: int, chat_id: int, message_id: int):
@@ -202,38 +232,81 @@ async def get_user_payments(user_id: int, limit: int = 50):
 
 
         # -----------------------------
-        # Обратная связь / поддержка
-        # -----------------------------
-        async def add_feedback(name: str, email: str, message: str, user_id: int | None = None):
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("""
-                    INSERT INTO feedbacks (user_id, name, email, message, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (user_id, name, email, message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                await db.commit()
+# Обратная связь / поддержка
+# -----------------------------
+async def add_feedback(name: str, email: str, message: str, user_id: int | None = None):
+    """Добавление обратной связи с валидацией данных."""
+    # Валидация входных данных
+    if not name or not isinstance(name, str) or len(name.strip()) == 0:
+        return False
+    if not email or not isinstance(email, str) or "@" not in email:
+        return False
+    if not message or not isinstance(message, str) or len(message.strip()) == 0:
+        return False
+    
+    # Ограничиваем длину полей
+    name = name.strip()[:100]
+    email = email.strip()[:200]
+    message = message.strip()[:1000]
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO feedbacks (user_id, name, email, message, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, name, email, message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            await db.commit()
+            return True
+    except Exception as e:
+        try:
+            import os
+            os.makedirs("logs", exist_ok=True)
+            with open("logs/db_error.log", "a", encoding="utf-8") as f:
+                f.write(f"DB Error in add_feedback: {e}\n")
+        except Exception:
+            pass
+        return False
 
-        async def get_feedbacks(limit: int = 100):
-            async with aiosqlite.connect(DB_PATH) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(
-                    "SELECT id, user_id, name, email, message, status, created_at FROM feedbacks ORDER BY id DESC LIMIT ?",
-                    (limit,)
-                ) as cursor:
-                    rows = await cursor.fetchall()
-                    return [dict(row) for row in rows]
+async def get_feedbacks(limit: int = 100):
+    """Получение обратной связи с улучшенной производительностью."""
+    # Валидация лимита
+    if not isinstance(limit, int) or limit <= 0 or limit > 1000:
+        limit = 100
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            # Добавляем индекс для ускорения (если его нет)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_feedbacks_id ON feedbacks(id)")
+            
+            async with db.execute(
+                "SELECT id, user_id, name, email, message, status, created_at FROM feedbacks ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+    except Exception as e:
+        try:
+            import os
+            os.makedirs("logs", exist_ok=True)
+            with open("logs/db_error.log", "a", encoding="utf-8") as f:
+                f.write(f"DB Error in get_feedbacks: {e}\n")
+        except Exception:
+            pass
+        return []
 
-        async def delete_feedback(feedback_id: int):
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("DELETE FROM feedbacks WHERE id = ?", (feedback_id,))
-                await db.commit()
+async def delete_feedback(feedback_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM feedbacks WHERE id = ?", (feedback_id,))
+        await db.commit()
 
-        async def update_feedback_status(feedback_id: int, status: str):
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("UPDATE feedbacks SET status = ? WHERE id = ?", (status, feedback_id))
-                await db.commit()
-
-
+async def update_feedback_status(feedback_id: int, status: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE feedbacks SET status = ? WHERE id = ?", (status, feedback_id))
+        await db.commit()
 
 
-import asyncio
-asyncio.get_event_loop().run_until_complete(init_db())
+
+
+# Инициализация базы данных удалена из импорта модуля
+# Это должно происходить в основном коде приложения

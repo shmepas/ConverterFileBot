@@ -7,8 +7,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.bot import DefaultBotProperties
 from dotenv import find_dotenv, load_dotenv
 
-from data_base.db import init_db
-
 from data_base.db import init_db, init_super_admin, log_system_event
 from handlers.user_privatka import user_privatka_router
 from handlers.adminka import admin_router
@@ -84,7 +82,6 @@ signal.signal(signal.SIGTERM, handle_exit)
 # Основная функция запуска
 # --------------------------
 async def main():
-    init_db()
     await setup_database()
     await bot.delete_webhook(drop_pending_updates=True)
     await setup_commands()

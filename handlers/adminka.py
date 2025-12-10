@@ -52,20 +52,29 @@ class FormatStates(StatesGroup):
 async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
     kb_builder = ReplyKeyboardBuilder()
     if await is_super_admin(user_id):
+        # Для супер-админа - распределяем кнопки по рядам для равномерного размера
         kb_builder.row(
             KeyboardButton(text="📜 Просмотр логов"),
-            KeyboardButton(text="➕ Добавить админа"),
+            KeyboardButton(text="➕ Добавить админа")
+        )
+        kb_builder.row(
             KeyboardButton(text="➖ Удалить админа"),
-            KeyboardButton(text="💳 Платежи"),
-            KeyboardButton(text="🎞 Форматы")
+            KeyboardButton(text="💳 Платежи")
+        )
+        kb_builder.row(
+            KeyboardButton(text="🎞 Форматы"),
+            KeyboardButton(text="⬅️ Закрыть админку")
         )
     elif await is_admin(user_id):
+        # Для обычного админа - тоже распределяем кнопки равномерно
         kb_builder.row(
             KeyboardButton(text="📜 Просмотр логов"),
-            KeyboardButton(text="💳 Платежи"),
-            KeyboardButton(text="🎞 Форматы")
+            KeyboardButton(text="💳 Платежи")
         )
-    kb_builder.row(KeyboardButton(text="⬅️ Закрыть админку"))
+        kb_builder.row(
+            KeyboardButton(text="🎞 Форматы"),
+            KeyboardButton(text="⬅️ Закрыть админку")
+        )
     return kb_builder.as_markup(resize_keyboard=True)
 
 # ------------------------------
@@ -75,9 +84,8 @@ def formats_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="MP3"), KeyboardButton(text="MP4"), KeyboardButton(text="GIF")],
-            [KeyboardButton(text="TXT"), KeyboardButton(text="PDF → PNG")],
-            [KeyboardButton(text="PDF → ZIP"), KeyboardButton(text="PNG → JPG")],
-            [KeyboardButton(text="PNG → JPEG"), KeyboardButton(text="⬅️ Назад")]
+            [KeyboardButton(text="TXT"), KeyboardButton(text="PDF → PNG"), KeyboardButton(text="PDF → ZIP")],
+            [KeyboardButton(text="PNG → JPG"), KeyboardButton(text="PNG → JPEG"), KeyboardButton(text="⬅️ Назад")]
         ],
         resize_keyboard=True
     )
@@ -112,10 +120,12 @@ async def convert_audio_ffmpeg_async(input_path: str, output_path: str):
 async def open_admin_panel(message: types.Message):
     user_id = message.from_user.id
     if await is_admin(user_id) or await is_super_admin(user_id):
+        await log_action(user_id, "Открыл админ-панель")
         kb = await admin_main_kb(user_id)
-        await message.answer("👋 Добро пожаловать в админ-панель!", reply_markup=kb)
+        await answer_editable(message, "👋 Добро пожаловать в админ-панель!", reply_markup=kb)
     else:
-        await message.answer("🚫 У вас нет доступа к админ-панели.")
+        await log_action(user_id, "Попытался открыть админ-панель (нет доступа)")
+        await answer_editable(message, "🚫 У вас нет доступа к админ-панели.")
 
 # ------------------------------
 # Моя роль
@@ -137,24 +147,27 @@ async def show_my_role(message: types.Message):
 @admin_router.message(F.text == "➕ Добавить админа")
 async def add_admin_start(message: types.Message, state: FSMContext):
     if not await is_super_admin(message.from_user.id):
-        await message.answer("❌ Только супер-админ может добавлять админов.")
+        await log_action(message.from_user.id, "Попытался добавить админа (нет прав супер-админа)")
+        await answer_editable(message, "❌ Только супер-админ может добавлять админов.")
         return
+    await log_action(message.from_user.id, "Нажал кнопку '➕ Добавить админа'")
     await state.set_state(AdminStates.add_admin_wait_id)
-    await message.answer("Введите ID пользователя для добавления в админы:")
+    await answer_editable(message, "Введите ID пользователя для добавления в админы:")
 
 @admin_router.message(AdminStates.add_admin_wait_id, F.text)
 async def add_admin_confirm(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text)
         await add_admin(user_id)
-        await message.answer(f"✅ Пользователь {user_id} добавлен как админ.")
-        await log_action(message.from_user.id, f"Добавил админа {user_id}")
+        await log_action(message.from_user.id, f"Добавил пользователя {user_id} как админа")
+        await answer_editable(message, f"✅ Пользователь {user_id} добавлен как админ.")
     except ValueError:
-        await message.answer("❌ Неверный ID, введите числовой ID.")
+        await log_action(message.from_user.id, f"Попытался добавить админа с неверным ID: {message.text}")
+        await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
     finally:
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(message.from_user.id)
-        await message.answer("Возврат в главное меню админки 👇", reply_markup=kb)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
 
 # ------------------------------
 # Удаление админа
@@ -162,30 +175,35 @@ async def add_admin_confirm(message: types.Message, state: FSMContext):
 @admin_router.message(F.text == "➖ Удалить админа")
 async def remove_admin_start(message: types.Message, state: FSMContext):
     if not await is_super_admin(message.from_user.id):
-        await message.answer("❌ Только супер-админ может удалять админов.")
+        await log_action(message.from_user.id, "Попытался удалить админа (нет прав супер-админа)")
+        await answer_editable(message, "❌ Только супер-админ может удалять админов.")
         return
+    await log_action(message.from_user.id, "Нажал кнопку '➖ Удалить админа'")
     await state.set_state(AdminStates.remove_admin_wait_id)
-    await message.answer("Введите ID пользователя для удаления из админов:")
+    await answer_editable(message, "Введите ID пользователя для удаления из админов:")
 
 @admin_router.message(AdminStates.remove_admin_wait_id, F.text)
 async def remove_admin_confirm(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text)
         await remove_admin(user_id)
-        await message.answer(f"✅ Пользователь {user_id} удален из админов.")
-        await log_action(message.from_user.id, f"Удалил админа {user_id}")
+        await log_action(message.from_user.id, f"Удалил пользователя {user_id} из админов")
+        await answer_editable(message, f"✅ Пользователь {user_id} удален из админов.")
     except ValueError:
-        await message.answer("❌ Неверный ID, введите числовой ID.")
+        await log_action(message.from_user.id, f"Попытался удалить админа с неверным ID: {message.text}")
+        await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
     finally:
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(message.from_user.id)
-        await message.answer("Возврат в главное меню админки 👇", reply_markup=kb)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
 
 # ------------------------------
 # Просмотр логов
 # ------------------------------
 @admin_router.message(F.text == "📜 Просмотр логов")
 async def view_logs_start(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    await log_action(user_id, "Нажал кнопку '📜 Просмотр логов'")
     await state.set_state(AdminStates.view_logs_page)
     await state.update_data(page=1)
     await send_logs_page(message, state)
@@ -195,7 +213,7 @@ async def send_logs_page(message: types.Message, state: FSMContext):
     page = data.get("page", 1)
     logs = await get_user_logs(limit=500)
     if not logs:
-        await message.answer("📭 Логов пока нет.")
+        await answer_editable(message, "📭 Логов пока нет.", reply_markup=ReplyKeyboardRemove())
         return
 
     total = len(logs)
@@ -213,14 +231,23 @@ async def send_logs_page(message: types.Message, state: FSMContext):
         action = log.get("action", "")
         text += f"👤 {uid} | 🕒 {ts}\n➡️ {action}\n\n"
 
+    # Создаем клавиатуру с кнопками одинакового размера
     builder = ReplyKeyboardBuilder()
+    navigation_buttons = []
     if page > 1:
-        builder.add(KeyboardButton(text="⬅️ Назад"))
+        navigation_buttons.append(KeyboardButton(text="⬅️ Назад"))
     if page < total_pages:
-        builder.add(KeyboardButton(text="▶️ Далее"))
+        navigation_buttons.append(KeyboardButton(text="▶️ Далее"))
+    
+    # Добавляем навигационные кнопки в ряд
+    if navigation_buttons:
+        builder.row(*navigation_buttons)
+    
+    # Добавляем кнопку выхода
     builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
+    
     kb = builder.as_markup(resize_keyboard=True)
-    await message.answer(text.strip(), reply_markup=kb)
+    await answer_editable(message, text.strip(), reply_markup=kb)
     await state.update_data(page=page)
 
 @admin_router.message(AdminStates.view_logs_page)
@@ -237,15 +264,17 @@ async def logs_navigation(message: types.Message, state: FSMContext):
     elif text == "⬅️ Выйти в главное меню":
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(message.from_user.id)
-        await message.answer("Возврат в главное меню админки 👇", reply_markup=kb)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
     else:
-        await message.answer("❌ Неизвестная команда. Используйте кнопки ниже.")
+        await answer_editable(message, "❌ Неизвестная команда. Используйте кнопки ниже.", reply_markup=ReplyKeyboardRemove())
 
 # ------------------------------
 # Просмотр платежей
 # ------------------------------
 @admin_router.message(F.text == "💳 Платежи")
 async def view_payments_start(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    await log_action(user_id, "Нажал кнопку '💳 Платежи'")
     await state.set_state(AdminStates.view_payments_page)
     await state.update_data(page=1)
     await send_payments_page(message, state)
@@ -255,7 +284,7 @@ async def send_payments_page(message: types.Message, state: FSMContext):
     page = data.get("page", 1)
     payments = await get_user_payments(limit=500)
     if not payments:
-        await message.answer("📭 История платежей пока пуста.")
+        await answer_editable(message, "📭 История платежей пока пуста.", reply_markup=ReplyKeyboardRemove())
         return
 
     total = len(payments)
@@ -270,14 +299,23 @@ async def send_payments_page(message: types.Message, state: FSMContext):
     for p in page_payments:
         text += f"👤 {p.get('user_id')} | 💰 {p.get('amount')} | 🕒 {p.get('timestamp')}\n\n"
 
+    # Создаем клавиатуру с кнопками одинакового размера
     builder = ReplyKeyboardBuilder()
+    navigation_buttons = []
     if page > 1:
-        builder.add(KeyboardButton(text="⬅️ Назад"))
+        navigation_buttons.append(KeyboardButton(text="⬅️ Назад"))
     if page < total_pages:
-        builder.add(KeyboardButton(text="▶️ Далее"))
+        navigation_buttons.append(KeyboardButton(text="▶️ Далее"))
+    
+    # Добавляем навигационные кнопки в ряд
+    if navigation_buttons:
+        builder.row(*navigation_buttons)
+    
+    # Добавляем кнопку выхода
     builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
+    
     kb = builder.as_markup(resize_keyboard=True)
-    await message.answer(text.strip(), reply_markup=kb)
+    await answer_editable(message, text.strip(), reply_markup=kb)
     await state.update_data(page=page)
 
 @admin_router.message(AdminStates.view_payments_page)
@@ -294,9 +332,9 @@ async def payments_navigation(message: types.Message, state: FSMContext):
     elif text == "⬅️ Выйти в главное меню":
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(message.from_user.id)
-        await message.answer("Возврат в главное меню админки 👇", reply_markup=kb)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
     else:
-        await message.answer("❌ Неизвестная команда. Используйте кнопки ниже.")
+        await answer_editable(message, "❌ Неизвестная команда. Используйте кнопки ниже.", reply_markup=ReplyKeyboardRemove())
 
 # ------------------------------
 # Работа с форматами
@@ -304,6 +342,7 @@ async def payments_navigation(message: types.Message, state: FSMContext):
 @admin_router.message(F.text == "🎞 Форматы")
 async def choose_format(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    await log_action(user_id, "Нажал кнопку '🎞 Форматы'")
     await state.set_state(FormatStates.waiting_format)
     await answer_editable(message, "Выберите формат для конвертации 👇", reply_markup=formats_kb())
 
@@ -542,7 +581,8 @@ async def back_from_formats(message: types.Message, state: FSMContext):
 # ------------------------------
 @admin_router.message(F.text == "⬅️ Закрыть админку")
 async def close_admin(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    await log_action(user_id, "Нажал кнопку '⬅️ Закрыть админку'")
     await state.clear()
-    await message.answer("Админка закрыта ✅", reply_markup=main_menu_kb())
-    await log_action(message.from_user.id, "Закрыл админку")
+    await answer_editable(message, "Админка закрыта ✅", reply_markup=main_menu_kb())
 
