@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "c:\Project\handlers\user_privatka.py", line 514, in user_format_selected
+    output_path = file_converter.convert_file(file_path, fmt)
+  File "c:\Project\converter_service.py", line 296, in convert_file
+    return self.convert_to_txt(input_path)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "c:\Project\converter_service.py", line 255, in convert_to_txt
+    raise e
+  File "c:\Project\converter_service.py", line 246, in convert_to_txt
+    raise ValueError(f"Неподдерживаемый формат для конвертации в TXT: {ext}")
+ValueError: Неподдерживаемый формат для конвертации в TXT: .docx
