@@ -8,6 +8,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 from utils import answer_editable
 from kbds.reply import format_choice_kb, main_menu_kb
 from converter_service import file_converter
+from data_base import db
 
 formats_router = Router()
 
@@ -31,6 +32,8 @@ def formats_kb() -> ReplyKeyboardMarkup:
 # --- Кнопка запуска ---
 @formats_router.message(F.text == "🎞 Форматы")
 async def choose_format(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    print(f"[FORMATS DEBUG] 🎞 FORMATS BUTTON CLICKED in formats.py for user {user_id}")
     await state.set_state(FormatStates.waiting_format)
     await answer_editable(message, "🎞 Выберите формат для конвертации 👇", reply_markup=formats_kb())
 
@@ -59,6 +62,7 @@ async def format_selected(message: types.Message, state: FSMContext):
 @formats_router.message(FormatStates.waiting_file, F.content_type.in_({"document", "video", "audio"}))
 async def convert_file(message: types.Message, state: FSMContext):
     """Обработка загруженного файла для конвертации."""
+    user_id = message.from_user.id
     data = await state.get_data()
     fmt = data.get("selected_format")
     file_obj = message.document or message.video or message.audio
@@ -68,10 +72,41 @@ async def convert_file(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
+    # Проверка лимитов конвертации
+    limits = await db.check_user_limits(user_id)
+    
+    # Проверяем лимит конвертаций для бесплатных пользователей
+    if not limits['is_premium']:
+        if not await db.increment_conversion_count(user_id):
+            # Лимит исчерпан
+            limit_message = f"""🚫 **Дневной лимит исчерпан!**
+
+📊 **Ваш статус:**
+• Использовано сегодня: {limits['current_count']}/{limits['daily_limit']} конвертаций
+• Осталось: 0 конвертаций
+
+💎 **Хотите больше возможностей?**
+
+✅ **Премиум подписка даёт:**
+• 🚀 Безлимитные конвертации
+• 📁 Файлы до 100 МБ (вместо 20 МБ)
+• 🎯 Все форматы без ограничений
+• ⚡ Приоритетная обработка
+• 🔧 Расширенные функции
+
+💰 **Стоимость:** от 299₽/месяц
+
+Для покупки подписки нажмите "💰 Вариант оплаты" в меню"""
+            
+            await message.answer(limit_message, parse_mode="Markdown")
+            await state.clear()
+            return
+
     # Проверка размера файла
     file_size = getattr(file_obj, "file_size", 0)
-    if file_size > 20 * 1024 * 1024:
-        await message.answer("🚫 Файл слишком большой. Максимальный размер — 20 МБ.")
+    if file_size > limits['max_file_size']:
+        await message.answer(f"🚫 Файл слишком большой для вашего тарифа!\n\n📄 Размер файла: {file_size // (1024*1024)} МБ\n🎯 Лимит: {limits['max_file_size'] // (1024*1024)} МБ")
+        await state.clear()
         return
 
     import tempfile
@@ -89,8 +124,14 @@ async def convert_file(message: types.Message, state: FSMContext):
 
         # Отправляем результат пользователю
         await message.answer_document(FSInputFile(output_path), caption=f"✅ Файл конвертирован в {fmt}")
+        
+        # Для бесплатных пользователей показываем информацию об оставшихся конвертациях
+        if not limits['is_premium']:
+            final_count = await db.get_daily_conversion_count(user_id)
+            remaining = max(0, 5 - final_count)
+            await message.answer(f"📊 Конвертация выполнена!\n\nОсталось конвертаций на сегодня: {remaining}/5")
 
-    except Exception:
+    except Exception as e:
         await message.answer(f"❌ Ошибка конвертации:\n<code>{traceback.format_exc()}</code>", parse_mode="HTML")
 
     finally:

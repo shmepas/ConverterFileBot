@@ -10,9 +10,49 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from data_base import db as _db
 
 
+def _get_gif_recommendations(input_path: str) -> dict:
+    """
+    Анализирует видео и возвращает рекомендации для создания оптимального GIF.
+    
+    Args:
+        input_path: путь к исходному видео
+    
+    Returns:
+        dict с рекомендациями: width, fps, quality
+    """
+    # Получаем размер файла для оценки
+    file_size = os.path.getsize(input_path) if os.path.exists(input_path) else 0
+    
+    # Размер файла в MB
+    size_mb = file_size / (1024 * 1024)
+    
+    # Базовые рекомендации
+    recommendations = {
+        "width": 480,
+        "fps": 12,
+        "quality": "medium"
+    }
+    
+    # Корректируем на основе размера файла
+    if size_mb < 5:  # Маленькие файлы - высокое качество
+        recommendations["width"] = 480
+        recommendations["fps"] = 15
+        recommendations["quality"] = "high"
+    elif size_mb < 20:  # Средние файлы
+        recommendations["width"] = 400
+        recommendations["fps"] = 12
+        recommendations["quality"] = "medium"
+    else:  # Большие файлы - агрессивная оптимизация
+        recommendations["width"] = 320
+        recommendations["fps"] = 10
+        recommendations["quality"] = "low"
+    
+    return recommendations
+
+
 async def answer_editable(message: types.Message, text: str, reply_markup=None, parse_mode=None, disable_web_page_preview=None):
     """
-    Try to edit the bot's last message to this user. If editing fails, delete previous and send a new message.
+    Try to edit the bot's last message to this user. If editing fails, send a new message instead of deleting.
     Stores the last bot message id per user in the DB.
     Use this instead of `message.answer` when you want to avoid chat clutter.
     """
@@ -28,11 +68,8 @@ async def answer_editable(message: types.Message, text: str, reply_markup=None, 
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=last.get('message_id'), reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
             return
         except Exception:
-            # couldn't edit (maybe message deleted or not editable) - try to delete old message
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=last.get('message_id'))
-            except Exception:
-                pass
+            # couldn't edit (maybe message deleted or not editable) - send new message instead of deleting
+            pass
 
     # Send new message and save its id
     sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
@@ -52,10 +89,8 @@ async def send_editable_raw(bot, user_id: int, chat_id: int, text: str, reply_ma
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=last.get('message_id'), reply_markup=reply_markup, parse_mode=parse_mode)
             return
         except Exception:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=last.get('message_id'))
-            except Exception:
-                pass
+            # couldn't edit - send new message instead of deleting
+            pass
 
     sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     try:
@@ -135,72 +170,35 @@ async def compress_video_ffmpeg_async(input_path: str, output_path: str, *, crf:
         raise RuntimeError(f"FFmpeg compress error:\n{stderr.decode()}")
 
 
-async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *, width: int = 360, fps: int = 10, quality: str = "high"):
+async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *, width: int = None, fps: int = None, quality: str = None):
     """
-    Конвертирует видео в высококачественный GIF с использованием оптимизированных параметров.
+    Конвертирует видео в высококачественный GIF с использованием анализа исходного видео.
     
     Args:
         input_path: путь к исходному видео
         output_path: путь для сохранения GIF
-        width: максимальная ширина (по умолчанию 360 для лучшей производительности)
-        fps: частота кадров (по умолчанию 10 для плавности)
-        quality: качество ('high', 'medium', 'low') - влияет на цветовую палитру
+        width: максимальная ширина (если None, определяется автоматически)
+        fps: частота кадров (если None, определяется автоматически)
+        quality: качество ('high', 'medium', 'low') - если None, определяется автоматически
     """
-    import subprocess
+    # Получаем рекомендации на основе анализа видео
+    recommendations = _get_gif_recommendations(input_path)
     
-    # Получаем информацию о видео для оптимизации
-    probe_cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json", 
-        "-show_format", "-show_streams", input_path
-    ]
-
-    try:
-        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
-        if probe_result.returncode == 0:
-            import json
-            video_info = json.loads(probe_result.stdout)
-            # Находим видео поток
-            video_stream = None
-            for stream in video_info.get('streams', []):
-                if stream.get('codec_type') == 'video':
-                    video_stream = stream
-                    break
-            
-            if video_stream:
-                # Адаптивные настройки на основе исходного видео
-                orig_width = int(video_stream.get('width', 640))
-                orig_height = int(video_stream.get('height', 480))
-                orig_fps = eval(video_stream.get('r_frame_rate', '25/1'))
-                
-                # Оптимизируем размер для лучшего качества
-                if orig_width <= 480:
-                    width = min(width, orig_width)
-                elif orig_width <= 720:
-                    width = min(width, 480)
-                else:
-                    width = min(width, 540)
-                
-                # Оптимизируем FPS для плавности
-                if orig_fps >= 30:
-                    fps = min(fps, 12)  # Ограничиваем для производительности
-                elif orig_fps >= 24:
-                    fps = min(fps, 10)
-                else:
-                    fps = min(fps, int(orig_fps))
-    except Exception:
-        # Если не удалось получить информацию, используем настройки по умолчанию
-        pass
+    # Используем рекомендации или переданные параметры
+    final_width = width if width is not None else recommendations["width"]
+    final_fps = fps if fps is not None else recommendations["fps"]
+    final_quality = quality if quality is not None else recommendations["quality"]
 
     palette_path = output_path + '.palette.png'
     
     # Улучшенные параметры масштабирования
-    scale_expr = f"scale='min({width},iw)':-2:flags=lanczos"
+    scale_expr = f"scale='min({final_width},iw)':-2:flags=lanczos"
     
-    # Настройки качества на основе параметра quality
-    if quality == "high":
+    # Настройки качества на основе параметра final_quality
+    if final_quality == "high":
         palette_gen_opts = "stats_mode=full"
         palette_use_opts = "dither=sierra2_4a"
-    elif quality == "medium":
+    elif final_quality == "medium":
         palette_gen_opts = "stats_mode=diff"
         palette_use_opts = "dither=bayer:bayer_scale=5"
     else:  # low
@@ -210,7 +208,7 @@ async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *
     # Первый проход: генерация оптимизированной палитры
     cmd_palette = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vf", f"fps={fps},{scale_expr},palettegen={palette_gen_opts}", 
+        "-vf", f"fps={final_fps},{scale_expr},palettegen={palette_gen_opts}", 
         palette_path
     ]
 
@@ -232,7 +230,7 @@ async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *
     # Второй проход: создание GIF с оптимизированной палитрой
     cmd_use = [
         "ffmpeg", "-y", "-i", input_path, "-i", palette_path,
-        "-lavfi", f"fps={fps},{scale_expr} [x]; [x][1:v] paletteuse={palette_use_opts}",
+        "-lavfi", f"fps={final_fps},{scale_expr} [x]; [x][1:v] paletteuse={palette_use_opts}",
         "-loop", "0",  # Бесконечное воспроизведение
         output_path
     ]
@@ -260,7 +258,7 @@ async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *
             file_size = os.path.getsize(output_path)
             # Если файл больше 10MB, дополнительно оптимизируем
             if file_size > 10 * 1024 * 1024:
-                await _optimize_large_gif(output_path, width, fps)
+                await _optimize_large_gif(output_path, final_width, final_fps)
     except Exception:
         pass
 

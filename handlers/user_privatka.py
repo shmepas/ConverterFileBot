@@ -11,7 +11,7 @@ import time
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import FSInputFile
 from data_base import db
-from data_base.db import add_user, log_action, is_admin, is_super_admin
+from data_base.db import add_user, log_action, is_admin, is_super_admin, check_user_limits, get_subscription_status_text
 from kbds import reply
 from utils import answer_editable
 from converter_service import file_converter
@@ -32,35 +32,58 @@ class MenuStates(StatesGroup):
 # Удалены неиспользуемые состояния и дублирование
 
 # ------------------------------
-# Динамическая клавиатура по роли
+# Динамическая клавиатура по роли (единообразная)
 # ------------------------------
 async def build_dynamic_keyboard(user_id: int, admin_open: bool = False) -> types.ReplyKeyboardMarkup:
     kb_builder = ReplyKeyboardBuilder()
     
-    # Основные кнопки
-    kb_builder.add(
-        types.KeyboardButton(text="Меню"),
-        types.KeyboardButton(text="О боте"),
-        types.KeyboardButton(text="Вариант оплаты"),
-        types.KeyboardButton(text="🎞 Форматы")
-    )
-    kb_builder.row(types.KeyboardButton(text="💳 Платежи"))
-    kb_builder.row(types.KeyboardButton(text="Моя роль"))
+    # Основные кнопки (все одинакового размера)
+    main_buttons = [
+        "📋 Меню",
+        "ℹ️ О боте", 
+        "💰 Вариант оплаты",
+        "🎞 Форматы",
+        "💳 Платежи",
+        "👤 Моя роль"
+    ]
+    
+    # Добавляем основные кнопки по 2 в ряд для единообразия
+    for i in range(0, len(main_buttons), 2):
+        if i + 1 < len(main_buttons):
+            kb_builder.row(
+                types.KeyboardButton(text=main_buttons[i]),
+                types.KeyboardButton(text=main_buttons[i + 1])
+            )
+        else:
+            kb_builder.row(types.KeyboardButton(text=main_buttons[i]))
 
-    # Админка
+    # Админские кнопки (только для админов)
     if await is_admin(user_id) or await is_super_admin(user_id):
         if admin_open:
+            # Админские функции
             if await is_super_admin(user_id):
+                # Супер-админ видит все функции
                 kb_builder.row(
                     types.KeyboardButton(text="📜 Просмотр логов"),
+                    types.KeyboardButton(text="💎 Управление подписками")
+                )
+                kb_builder.row(
                     types.KeyboardButton(text="➕ Добавить админа"),
                     types.KeyboardButton(text="➖ Удалить админа")
                 )
             else:
-                kb_builder.row(types.KeyboardButton(text="📜 Просмотр логов"))
+                # Обычный админ видит только просмотр логов
+                kb_builder.row(
+                    types.KeyboardButton(text="📜 Просмотр логов"),
+                    types.KeyboardButton(text="💎 Просмотр подписок")
+                )
             kb_builder.row(types.KeyboardButton(text="⬅️ Закрыть админку"))
         else:
-            kb_builder.row(types.KeyboardButton(text="Админка"))
+            # Кнопка открытия админки
+            kb_builder.row(types.KeyboardButton(text="🔧 Админка"))
+
+    # Контакт для связи при проблемах (для всех)
+    kb_builder.row(types.KeyboardButton(text="🆘 Связь с разработчиком"))
 
     return kb_builder.as_markup(resize_keyboard=True)
 
@@ -141,7 +164,7 @@ async def about_bot_handler(message: types.Message, state: FSMContext):
     """Показывает информацию о боте."""
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку 'О боте'")
-    await state.set_state(MenuStates.about)
+    await state.set_state(MenuStates.main)  # Возвращаемся в главное меню
     kb = await build_dynamic_keyboard(user_id)
     
     about_text = """ℹ️ **О боте**
@@ -173,7 +196,7 @@ async def about_bot_handler(message: types.Message, state: FSMContext):
 # ------------------------------
 # Кнопка "Меню"
 # ------------------------------
-@user_privatka_router.message(F.text == "Меню")
+@user_privatka_router.message(F.text.in_(["📋 Меню", "Меню"]))
 async def menu_handler(message: types.Message, state: FSMContext):
     """Показывает главное меню."""
     user_id = message.from_user.id
@@ -185,25 +208,34 @@ async def menu_handler(message: types.Message, state: FSMContext):
 # ------------------------------
 # Кнопка "Моя роль"
 # ------------------------------
-@user_privatka_router.message(F.text == "Моя роль")
+@user_privatka_router.message(F.text.in_(["👤 Моя роль", "Моя роль"]))
 async def my_role_handler(message: types.Message, state: FSMContext):
-    """Показывает роль пользователя."""
+    """Показывает роль пользователя и статус подписки."""
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку 'Моя роль'")
     
+    # Определяем роль
     role = "👤 Пользователь"
     if await is_super_admin(user_id):
         role = "👑 Супер-администратор"
     elif await is_admin(user_id):
         role = "🛡️ Администратор"
     
+    # Получаем статус подписки
+    subscription_text = await get_subscription_status_text(user_id)
+    
+    # Формируем полное сообщение
+    full_text = f"""**Ваша роль:** {role}
+
+{subscription_text}"""
+    
     kb = await build_dynamic_keyboard(user_id)
-    await answer_editable(message, f"Ваша роль: {role}", reply_markup=kb)
+    await answer_editable(message, full_text, parse_mode="Markdown", reply_markup=kb)
     
 # ------------------------------
 # Кнопка "Вариант оплаты"
 # ------------------------------
-@user_privatka_router.message(F.text == "Вариант оплаты")
+@user_privatka_router.message(F.text.in_(["💰 Вариант оплаты", "Вариант оплаты"]))
 async def payment_option_handler(message: types.Message, state: FSMContext):
     """Показывает информацию о вариантах оплаты."""
     user_id = message.from_user.id
@@ -211,33 +243,72 @@ async def payment_option_handler(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.payment)
     kb = await build_dynamic_keyboard(user_id)
     
-    payment_text = """💳 **Варианты оплаты**
+    payment_text = """💳 **💎 Премиум подписка - Расширьте возможности!**
 
-🔄 **Бесплатные конвертации:**
-• До 5 конвертаций в день - бесплатно
-• Все основные форматы доступны
-• Максимальный размер файла: 20 МБ
+🔄 **Ваш текущий тариф - БЕСПЛАТНЫЙ:**
+• ✅ 5 конвертаций в день
+• ✅ Основные форматы: MP3, MP4, GIF, TXT, PDF, PNG, JPG
+• ✅ Максимальный размер файла: 20 МБ
 
-💎 **Премиум подписка:**
-• Безлимитные конвертации
-• Файлы до 100 МБ
-• Приоритетная обработка
-• Расширенные форматы
+💎 **Премиум подписка - ВСЕ возможности:**
+• 🚀 **Безлимитные конвертации** - конвертируйте сколько угодно!
+• 📁 **Большие файлы до 100 МБ** - работайте с любыми проектами
+• ⚡ **Приоритетная обработка** - ваши файлы обрабатываются первыми
+• 🎯 **Все форматы без ограничений**
+• 🔧 **Расширенные функции** - доступ к новым возможностям
+• 💬 **Приоритетная поддержка**
 
-💰 **Стоимость:**
-• 1 месяц: 299 ₽
-• 3 месяца: 799 ₽ (экономия 100 ₽)
-• 1 год: 2999 ₽ (экономия 600 ₽)
+💰 **Выгодные тарифы:**
+┌─ **1 месяц:** 299 ₽
+├─ **3 месяца:** 799 ₽ *(экономия 100 ₽)*
+└─ **1 год:** 2999 ₽ *(экономия 600 ₽)*
 
 📱 **Способы оплаты:**
-• Банковские карты
-• QIWI
-• ЮMoney
-• Криптовалюты
+💳 Банковские карты • 💰 QIWI • 🟡 ЮMoney • ₿ Криптовалюты
 
-Для оформления подписки обратитесь к администратору."""
+🎯 **Готово к покупке?**
+Для оформления подписки нажмите "🆘 Связь с разработчиком" и напишите @claperonn
+
+⏰ **Специальное предложение:** Первый месяц со скидкой 20%!"""
     
     await answer_editable(message, payment_text, parse_mode="Markdown", reply_markup=kb)
+
+# ------------------------------
+# Кнопка "Админка"
+# ------------------------------
+@user_privatka_router.message(F.text.in_(["🔧 Админка", "Админка"]))
+async def admin_panel_handler(message: types.Message, state: FSMContext):
+    """Открывает админскую панель для админов."""
+    user_id = message.from_user.id
+    await log_action(user_id, "Нажал кнопку 'Админка'")
+    
+    # Проверяем права администратора
+    if not (await is_admin(user_id) or await is_super_admin(user_id)):
+        await answer_editable(message, "❌ У вас нет прав для доступа к админской панели.")
+        return
+
+    # Показываем админскую панель
+    kb = await build_dynamic_keyboard(user_id, admin_open=True)
+    await answer_editable(message, "🔧 Админская панель открыта 👇", reply_markup=kb)
+
+# ------------------------------
+# Кнопка "Закрыть админку"
+# ------------------------------
+@user_privatka_router.message(F.text.in_(["⬅️ Закрыть админку", "Закрыть админку"]))
+async def close_admin_panel_handler(message: types.Message, state: FSMContext):
+    """Закрывает админскую панель."""
+    user_id = message.from_user.id
+    await log_action(user_id, "Нажал кнопку 'Закрыть админку'")
+    
+    # Проверяем права администратора
+    if not (await is_admin(user_id) or await is_super_admin(user_id)):
+        await answer_editable(message, "❌ У вас нет прав для доступа к админской панели.")
+        return
+
+    # Закрываем админскую панель и возвращаемся в главное меню
+    await state.set_state(MenuStates.main)
+    kb = await build_dynamic_keyboard(user_id, admin_open=False)
+    await answer_editable(message, "✅ Админская панель закрыта", reply_markup=kb)
 
 # ------------------------------
 # Выбор формата
@@ -268,6 +339,12 @@ async def choose_format_handler(message: types.Message, state: FSMContext):
 @user_privatka_router.message(F.document)
 async def handle_file(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    print(f"[USER_PRIVATKA DEBUG] 📁 DOCUMENT RECEIVED via user_privatka.py for user {user_id}")
+    print(f"[USER_PRIVATKA DEBUG] File name: {message.document.file_name}")
+    print(f"[USER_PRIVATKA DEBUG] File size: {message.document.file_size}")
+    print(f"[USER_PRIVATKA DEBUG] Current state: {await state.get_state()}")
+    print(f"[USER_PRIVATKA DEBUG] File type: {message.document.mime_type}")
+    
     await log_action(user_id, f"Отправил файл: {message.document.file_name}")
     
     file = message.document
@@ -294,7 +371,7 @@ async def handle_file(message: types.Message, state: FSMContext):
             kb = await build_dynamic_keyboard(user_id)
             await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
             return
-
+    
     os.makedirs("downloads", exist_ok=True)
 
     try:
@@ -364,20 +441,34 @@ async def handle_file(message: types.Message, state: FSMContext):
 # Выбор формата после загрузки файла
 # ------------------------------
 @user_privatka_router.message(MenuStates.waiting_format, F.text.in_({"MP3", "MP4", "GIF", "PDF → PNG", "PDF → ZIP", "PNG → JPG", "PNG → JPEG", "TXT"}))
+async def user_format_selected_debug(message: types.Message, state: FSMContext):
+    """Обработка выбранного формата конвертации с проверкой лимитов - DEBUG VERSION."""
+    user_id = message.from_user.id
+    print(f"[USER_PRIVATKA DEBUG] 🎯 FORMAT SELECTED CALLED via user_privatka.py for user {user_id}")
+    print(f"[USER_PRIVATKA DEBUG] Selected format: {message.text}")
+    print(f"[USER_PRIVATKA DEBUG] Current state: {await state.get_state()}")
+    
+    # Вызываем основную функцию
+    await user_format_selected(message, state)
 async def user_format_selected(message: types.Message, state: FSMContext):
-    """Обработка выбранного формата конвертации."""
+    """Обработка выбранного формата конвертации с проверкой лимитов."""
     user_id = message.from_user.id
     current_state = await state.get_state()
+    selected_format = message.text
+    
+    print(f"[DEBUG MP3] user_format_selected called for user {user_id}, format: {selected_format}")
     
     # Дополнительная проверка состояния
     if current_state != MenuStates.waiting_format:
+        print(f"[DEBUG MP3] Unexpected state: {current_state}, expected: {MenuStates.waiting_format}")
         await answer_editable(message, "⚠️ Неожиданное состояние. Возвращаю в главное меню.")
         await state.clear()
         kb = await build_dynamic_keyboard(user_id)
         await answer_editable(message, "📋 Главное меню 👇", reply_markup=kb)
         return
 
-    await log_action(user_id, f"Выбрал формат конвертации: {message.text}")
+    print(f"[DEBUG MP3] Starting conversion process for format: {selected_format}")
+    await log_action(user_id, f"Выбрал формат конвертации: {selected_format}")
     
     data = await state.get_data()
     file_path = data.get("file_path")
@@ -391,17 +482,90 @@ async def user_format_selected(message: types.Message, state: FSMContext):
         return
 
     fmt = message.text
+    
+    # ПРОВЕРКА ЛИМИТОВ ПОДПИСКИ
+    limits = await db.check_user_limits(user_id)
+    
+    # Проверяем лимит конвертаций для бесплатных пользователей
+    if not limits['is_premium']:
+        print(f"[DEBUG MP3] User {user_id} is free user, checking limits for format {fmt}")
+        print(f"[DEBUG MP3] Current limits: {limits}")
+        
+        if not await db.increment_conversion_count(user_id):
+            # Лимит исчерпан - предлагаем купить подписку
+            limit_message = f"""🚫 **Дневной лимит исчерпан!**
+
+📊 **Ваш статус:**
+• Использовано сегодня: {limits['current_count']}/{limits['daily_limit']} конвертаций
+• Осталось: 0 конвертаций
+
+💎 **Хотите больше возможностей?**
+
+✅ **Премиум подписка даёт:**
+• 🚀 Безлимитные конвертации
+• 📁 Файлы до 100 МБ (вместо 20 МБ)
+• 🎯 Все форматы без ограничений
+• ⚡ Приоритетная обработка
+• 🔧 Расширенные функции
+
+💰 **Стоимость:** от 299₽/месяц
+
+Для покупки подписки нажмите "💰 Вариант оплаты" в меню 👇"""
+            
+            await answer_editable(message, limit_message, parse_mode="Markdown")
+            await state.set_state(MenuStates.main)
+            kb = await build_dynamic_keyboard(user_id)
+            await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
+            return
+        else:
+            print(f"[DEBUG MP3] Successfully incremented conversion count for user {user_id}")
+    else:
+        print(f"[DEBUG MP3] User {user_id} is premium user, no limits")
+    
+    # Проверяем размер файла в зависимости от подписки
+    if os.path.exists(file_path):
+        file_size = os.path.getsize(file_path)
+        if file_size > limits['max_file_size']:
+            await answer_editable(message, f"❌ Файл слишком большой для вашего тарифа!\n\n📄 Размер файла: {file_size // (1024*1024)} МБ\n🎯 Лимит: {limits['max_file_size'] // (1024*1024)} МБ")
+            await state.set_state(MenuStates.main)
+            kb = await build_dynamic_keyboard(user_id)
+            await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
+            return
+    
     output_path = None
     
     try:
+        print(f"[DEBUG MP3] Starting conversion for user {user_id}, format: {fmt}")
         await answer_editable(message, "⏳ Конвертирую файл, это может занять время...")
         
         # Используем централизованный сервис конвертации
+        print(f"[DEBUG MP3] Calling file_converter.convert_file for format: {fmt}")
         output_path = file_converter.convert_file(file_path, fmt)
+        print(f"[DEBUG MP3] Conversion completed, output path: {output_path}")
         
         # Отправляем результат пользователю
+        print(f"[DEBUG MP3] Sending result to user {user_id}")
         await message.answer_document(FSInputFile(output_path), caption=f"✅ Файл конвертирован в {fmt}")
         await log_action(user_id, f"Конвертировал файл в формат {fmt}")
+        print(f"[DEBUG MP3] Successfully sent result for user {user_id}, format: {fmt}")
+
+        # Для бесплатных пользователей показываем информацию об оставшихся конвертациях
+        if not limits['is_premium']:
+            remaining = limits['remaining'] - 1 if limits['remaining'] > 0 else 0
+            if remaining >= 0:
+                remaining_message = f"""📊 **Конвертация выполнена!**
+
+✅ Файл успешно конвертирован в формат {fmt}
+
+📈 **Ваш статус:**
+• Осталось конвертаций на сегодня: {remaining}/5
+• Использовано: {5 - remaining}/5
+
+💎 **Хотите больше возможностей?**
+Премиум подписка даёт безлимитные конвертации и файлы до 100 МБ!
+
+Для покупки нажмите "💰 Вариант оплаты" в меню 👇"""
+                await answer_editable(message, remaining_message, parse_mode="Markdown")
 
     except Exception as e:
         # Логируем ошибку
@@ -447,21 +611,56 @@ async def show_payments_handler(message: types.Message, state: FSMContext):
     except Exception as e:
         await answer_editable(message, "⚠️ Ошибка при получении истории платежей.")
         print("get_user_payments error:", e)
+        # Возвращаем в главное меню при ошибке
+        await state.set_state(MenuStates.main)
+        kb = await build_dynamic_keyboard(user_id)
+        await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
         return
 
+    # Получаем статус подписки
+    subscription_text = await get_subscription_status_text(user_id)
+    
     if not payments:
-        await answer_editable(message, "📭 У вас пока нет записей о платежах.")
-        return
+        text = f"{subscription_text}\n\n📭 У вас пока нет записей о платежах."
+    else:
+        lines = []
+        for p in payments:
+            date = p.get("date", "")
+            amount = p.get("amount", 0)
+            ptype = p.get("type", "")
+            desc = p.get("description", "")
+            sign = "+" if ptype.lower().startswith("пополн") else "-" if ptype.lower().startswith("спис") else ""
+            lines.append(f"{date} — {sign}{amount} ₽ — {ptype} — {desc}")
 
-    lines = []
-    for p in payments:
-        date = p.get("date", "")
-        amount = p.get("amount", 0)
-        ptype = p.get("type", "")
-        desc = p.get("description", "")
-        sign = "+" if ptype.lower().startswith("пополн") else "-" if ptype.lower().startswith("спис") else ""
-        lines.append(f"{date} — {sign}{amount} ₽ — {ptype} — {desc}")
-
-    text = "💳 Ваша история платежей:\n\n" + "\n".join(lines)
+        payments_text = "💳 Ваша история платежей:\n\n" + "\n".join(lines)
+        text = f"{subscription_text}\n\n{payments_text}"
+    
+    # Возвращаемся в главное меню после показа платежей
+    await state.set_state(MenuStates.main)
     kb = await build_dynamic_keyboard(user_id)
-    await answer_editable(message, text, reply_markup=kb)
+    await answer_editable(message, text + "\n\n↩️ Возвращаю в главное меню", parse_mode="Markdown", reply_markup=kb)
+
+# ------------------------------
+# Связь с разработчиком
+# ------------------------------
+@user_privatka_router.message(F.text == "🆘 Связь с разработчиком")
+async def contact_developer_handler(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    await log_action(user_id, "Нажал кнопку '🆘 Связь с разработчиком'")
+    
+    contact_text = """🆘 **Связь с разработчиком**
+
+Если у вас возникли проблемы с ботом или есть предложения по улучшению, вы можете связаться со мной:
+
+👤 **Telegram:** @claperonn
+
+📝 **При обращении укажите:**
+- Описание проблемы
+- Ваш User ID: `{user_id}`
+- Время возникновения проблемы
+
+💬 Я постараюсь помочь вам в кратчайшие сроки!"""
+    
+    await state.set_state(MenuStates.main)
+    kb = await build_dynamic_keyboard(user_id)
+    await answer_editable(message, contact_text.format(user_id=user_id), parse_mode="Markdown", reply_markup=kb)

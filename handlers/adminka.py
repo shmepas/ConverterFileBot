@@ -23,7 +23,9 @@ from utils import compress_video_ffmpeg_async, convert_video_to_gif_ffmpeg_async
 
 from data_base.db import (
     log_action, is_admin, is_super_admin,
-    add_admin, remove_admin, get_user_logs, get_user_payments
+    add_admin, remove_admin, get_user_logs, get_user_payments,
+    get_all_subscriptions, get_pending_payments, mark_payment_completed,
+    activate_premium_subscription, deactivate_subscription
 )
 
 admin_router = Router()
@@ -41,6 +43,9 @@ class AdminStates(StatesGroup):
     remove_admin_wait_id = State()
     view_logs_page = State()
     view_payments_page = State()
+    subscription_management = State()
+    activate_premium_wait_id = State()
+    deactivate_subscription_wait_id = State()
 
 class FormatStates(StatesGroup):
     waiting_format = State()
@@ -52,21 +57,24 @@ class FormatStates(StatesGroup):
 async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
     kb_builder = ReplyKeyboardBuilder()
     if await is_super_admin(user_id):
-        # Для супер-админа - распределяем кнопки по рядам для равномерного размера
+        # Для супер-админа - добавляем управление подписками
         kb_builder.row(
             KeyboardButton(text="📜 Просмотр логов"),
-            KeyboardButton(text="➕ Добавить админа")
+            KeyboardButton(text="💎 Управление подписками")
         )
         kb_builder.row(
-            KeyboardButton(text="➖ Удалить админа"),
-            KeyboardButton(text="💳 Платежи")
+            KeyboardButton(text="➕ Добавить админа"),
+            KeyboardButton(text="➖ Удалить админа")
         )
         kb_builder.row(
-            KeyboardButton(text="🎞 Форматы"),
+            KeyboardButton(text="💳 Платежи"),
+            KeyboardButton(text="🎞 Форматы")
+        )
+        kb_builder.row(
             KeyboardButton(text="⬅️ Закрыть админку")
         )
     elif await is_admin(user_id):
-        # Для обычного админа - тоже распределяем кнопки равномерно
+        # Для обычного админа - просмотр подписок без управления
         kb_builder.row(
             KeyboardButton(text="📜 Просмотр логов"),
             KeyboardButton(text="💳 Платежи")
@@ -153,6 +161,156 @@ async def add_admin_start(message: types.Message, state: FSMContext):
     await log_action(message.from_user.id, "Нажал кнопку '➕ Добавить админа'")
     await state.set_state(AdminStates.add_admin_wait_id)
     await answer_editable(message, "Введите ID пользователя для добавления в админы:")
+
+@admin_router.message(F.text == "💎 Управление подписками")
+async def subscription_management_start(message: types.Message, state: FSMContext):
+    """Начало управления подписками для супер-админа."""
+    if not await is_super_admin(message.from_user.id):
+        await log_action(message.from_user.id, "Попытался управлять подписками (нет прав супер-админа)")
+        await answer_editable(message, "❌ Только супер-админ может управлять подписками.")
+        return
+    
+    await log_action(message.from_user.id, "Нажал кнопку '💎 Управление подписками'")
+    await state.set_state(AdminStates.subscription_management)
+    
+    management_text = """💎 **Управление подписками**
+
+Выберите действие:
+
+👤 **Активировать премиум подписку**
+Введите ID пользователя для активации премиум подписки
+
+🚫 **Деактивировать подписку**
+Введите ID пользователя для деактивации подписки
+
+📊 **Просмотр статистики**
+Просмотр всех подписок и статистики
+
+⬅️ **Назад в главное меню**
+Возврат в главное меню админки"""
+    
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👤 Активировать премиум")],
+            [KeyboardButton(text="🚫 Деактивировать подписку")],
+            [KeyboardButton(text="📊 Просмотр статистики")],
+            [KeyboardButton(text="⬅️ Назад в главное меню")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await answer_editable(message, management_text, parse_mode="Markdown", reply_markup=kb)
+
+@admin_router.message(AdminStates.subscription_management)
+async def subscription_management_handler(message: types.Message, state: FSMContext):
+    """Обработчик действий в меню управления подписками."""
+    if message.text == "👤 Активировать премиум":
+        await log_action(message.from_user.id, "Выбрал активацию премиум подписки")
+        await state.set_state(AdminStates.activate_premium_wait_id)
+        await answer_editable(message, "Введите ID пользователя для активации премиум подписки:")
+    
+    elif message.text == "🚫 Деактивировать подписку":
+        await log_action(message.from_user.id, "Выбрал деактивацию подписки")
+        await state.set_state(AdminStates.deactivate_subscription_wait_id)
+        await answer_editable(message, "Введите ID пользователя для деактивации подписки:")
+    
+    elif message.text == "📊 Просмотр статистики":
+        await log_action(message.from_user.id, "Выбрал просмотр статистики подписок")
+        await show_subscriptions_stats(message, state)
+    
+    elif message.text == "⬅️ Назад в главное меню":
+        await log_action(message.from_user.id, "Вернулся в главное меню из управления подписками")
+        await state.set_state(AdminStates.main)
+        kb = await admin_main_kb(message.from_user.id)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+    else:
+        await answer_editable(message, "❌ Неизвестная команда. Используйте кнопки ниже.")
+
+@admin_router.message(AdminStates.activate_premium_wait_id, F.text)
+async def activate_premium_confirm(message: types.Message, state: FSMContext):
+    """Подтверждение активации премиум подписки."""
+    try:
+        user_id = int(message.text)
+        await activate_premium_subscription(user_id, duration_months=1)
+        await log_action(message.from_user.id, f"Активировал премиум подписку для пользователя {user_id}")
+        await answer_editable(message, f"✅ Премиум подписка активирована для пользователя {user_id} на 1 месяц.")
+    except ValueError:
+        await log_action(message.from_user.id, f"Попытался активировать подписку с неверным ID: {message.text}")
+        await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
+    except Exception as e:
+        await log_action(message.from_user.id, f"Ошибка активации подписки для {message.text}: {e}")
+        await answer_editable(message, f"❌ Ошибка активации подписки: {e}")
+    finally:
+        await state.set_state(AdminStates.main)
+        kb = await admin_main_kb(message.from_user.id)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+@admin_router.message(AdminStates.deactivate_subscription_wait_id, F.text)
+async def deactivate_subscription_confirm(message: types.Message, state: FSMContext):
+    """Подтверждение деактивации подписки."""
+    try:
+        user_id = int(message.text)
+        await deactivate_subscription(user_id)
+        await log_action(message.from_user.id, f"Деактивировал подписку для пользователя {user_id}")
+        await answer_editable(message, f"✅ Подписка деактивирована для пользователя {user_id}.")
+    except ValueError:
+        await log_action(message.from_user.id, f"Попытался деактивировать подписку с неверным ID: {message.text}")
+        await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
+    except Exception as e:
+        await log_action(message.from_user.id, f"Ошибка деактивации подписки для {message.text}: {e}")
+        await answer_editable(message, f"❌ Ошибка деактивации подписки: {e}")
+    finally:
+        await state.set_state(AdminStates.main)
+        kb = await admin_main_kb(message.from_user.id)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+async def show_subscriptions_stats(message: types.Message, state: FSMContext):
+    """Показывает статистику подписок."""
+    try:
+        subscriptions = await get_all_subscriptions(limit=100)
+        
+        if not subscriptions:
+            await answer_editable(message, "📊 Статистика подписок:\n\nПока нет данных о подписках.")
+            return
+        
+        # Подсчитываем статистику
+        total_users = len(subscriptions)
+        premium_users = len([s for s in subscriptions if s.get('plan_type') == 'premium' and s.get('is_active')])
+        free_users = total_users - premium_users
+        
+        stats_text = f"""📊 **Статистика подписок**
+
+👥 **Всего пользователей:** {total_users}
+💎 **Премиум подписчики:** {premium_users}
+🔄 **Бесплатные пользователи:** {free_users}
+
+📈 **Детализация:**
+"""
+        
+        # Добавляем детализацию по пользователям
+        for sub in subscriptions[:10]:  # Показываем только первых 10
+            user_id = sub.get('user_id', 'N/A')
+            username = sub.get('username', 'N/A')
+            plan_type = sub.get('plan_type', 'free')
+            is_active = sub.get('is_active', 0)
+            status = "✅ Активна" if is_active else "❌ Неактивна"
+            
+            stats_text += f"• ID: {user_id} (@{username}) - {plan_type} ({status})\n"
+        
+        if len(subscriptions) > 10:
+            stats_text += f"\n... и ещё {len(subscriptions) - 10} пользователей"
+        
+        await answer_editable(message, stats_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        await log_action(message.from_user.id, f"Ошибка получения статистики подписок: {e}")
+        await answer_editable(message, f"❌ Ошибка получения статистики: {e}")
+    
+    finally:
+        await state.set_state(AdminStates.main)
+        kb = await admin_main_kb(message.from_user.id)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
 
 @admin_router.message(AdminStates.add_admin_wait_id, F.text)
 async def add_admin_confirm(message: types.Message, state: FSMContext):
@@ -585,4 +743,213 @@ async def close_admin(message: types.Message, state: FSMContext):
     await log_action(user_id, "Нажал кнопку '⬅️ Закрыть админку'")
     await state.clear()
     await answer_editable(message, "Админка закрыта ✅", reply_markup=main_menu_kb())
+
+# ==============================
+# SUBSCRIPTION MANAGEMENT
+# ==============================
+
+@admin_router.message(F.text == "💎 Управление подписками")
+async def subscription_management_menu(message: types.Message, state: FSMContext):
+    """Меню управления подписками для супер-админа."""
+    user_id = message.from_user.id
+    if not await is_super_admin(user_id):
+        await answer_editable(message, "❌ Только супер-админ может управлять подписками.")
+        return
+    
+    await log_action(user_id, "Открыл меню управления подписками")
+    
+    kb_builder = ReplyKeyboardBuilder()
+    kb_builder.row(
+        KeyboardButton(text="📊 Все подписки"),
+        KeyboardButton(text="⏳ Ожидающие платежи")
+    )
+    kb_builder.row(
+        KeyboardButton(text="✅ Активировать подписку"),
+        KeyboardButton(text="❌ Деактивировать подписку")
+    )
+    kb_builder.row(
+        KeyboardButton(text="⬅️ Назад в админку")
+    )
+    
+    kb = kb_builder.as_markup(resize_keyboard=True)
+    await answer_editable(message, "💎 **Управление подписками**\n\nВыберите действие:", parse_mode="Markdown", reply_markup=kb)
+
+@admin_router.message(F.text == "📊 Все подписки")
+async def view_all_subscriptions(message: types.Message, state: FSMContext):
+    """Просмотр всех подписок."""
+    user_id = message.from_user.id
+    if not await is_super_admin(user_id):
+        await answer_editable(message, "❌ Только супер-админ может просматривать подписки.")
+        return
+    
+    await log_action(user_id, "Просматривает все подписки")
+    
+    try:
+        subscriptions = await get_all_subscriptions(50)
+        if not subscriptions:
+            await answer_editable(message, "📭 Подписок пока нет.")
+            return
+        
+        text = "📊 **Все подписки:**\n\n"
+        for sub in subscriptions:
+            username = sub.get('username', 'Неизвестно')
+            first_name = sub.get('first_name', '')
+            plan_type = sub.get('plan_type', 'free')
+            is_active = sub.get('is_active', 0)
+            status = "✅ Активна" if is_active else "❌ Неактивна"
+            
+            text += f"👤 {first_name} (@{username})\n"
+            text += f"📋 Тариф: {plan_type}\n"
+            text += f"🔄 Статус: {status}\n\n"
+        
+        # Возвращаемся в меню управления подписками
+        kb_builder = ReplyKeyboardBuilder()
+        kb_builder.row(
+            KeyboardButton(text="💎 Управление подписками"),
+            KeyboardButton(text="⬅️ Назад в админку")
+        )
+        kb = kb_builder.as_markup(resize_keyboard=True)
+        
+        await answer_editable(message, text, parse_mode="Markdown", reply_markup=kb)
+        
+    except Exception as e:
+        await answer_editable(message, f"❌ Ошибка при получении подписок: {str(e)}")
+
+@admin_router.message(F.text == "⏳ Ожидающие платежи")
+async def view_pending_payments(message: types.Message, state: FSMContext):
+    """Просмотр ожидающих платежей."""
+    user_id = message.from_user.id
+    if not await is_super_admin(user_id):
+        await answer_editable(message, "❌ Только супер-админ может просматривать платежи.")
+        return
+    
+    await log_action(user_id, "Просматривает ожидающие платежи")
+    
+    try:
+        payments = await get_pending_payments(20)
+        if not payments:
+            await answer_editable(message, "📭 Ожидающих платежей нет.")
+            return
+        
+        text = "⏳ **Ожидающие платежи:**\n\n"
+        for payment in payments:
+            payment_id = payment.get('id')
+            username = payment.get('username', 'Неизвестно')
+            first_name = payment.get('first_name', '')
+            amount = payment.get('amount', 0)
+            plan_duration = payment.get('plan_duration', '')
+            created_at = payment.get('created_at', '')
+            
+            text += f"🆔 ID: {payment_id}\n"
+            text += f"👤 {first_name} (@{username})\n"
+            text += f"💰 Сумма: {amount} ₽\n"
+            text += f"📅 Период: {plan_duration}\n"
+            text += f"🕒 Создан: {created_at}\n\n"
+        
+        # Возвращаемся в меню управления подписками
+        kb_builder = ReplyKeyboardBuilder()
+        kb_builder.row(
+            KeyboardButton(text="💎 Управление подписками"),
+            KeyboardButton(text="⬅️ Назад в админку")
+        )
+        kb = kb_builder.as_markup(resize_keyboard=True)
+        
+        await answer_editable(message, text, parse_mode="Markdown", reply_markup=kb)
+        
+    except Exception as e:
+        await answer_editable(message, f"❌ Ошибка при получении платежей: {str(e)}")
+
+@admin_router.message(F.text == "✅ Активировать подписку")
+async def activate_subscription_start(message: types.Message, state: FSMContext):
+    """Начало активации подписки."""
+    user_id = message.from_user.id
+    if not await is_super_admin(user_id):
+        await answer_editable(message, "❌ Только супер-админ может активировать подписки.")
+        return
+    
+    await state.set_state(AdminStates.add_admin_wait_id)  # Переиспользуем состояние
+    await answer_editable(message, "Введите ID пользователя для активации премиум подписки:")
+
+@admin_router.message(F.text == "❌ Деактивировать подписку")
+async def deactivate_subscription_start(message: types.Message, state: FSMContext):
+    """Начало деактивации подписки."""
+    user_id = message.from_user.id
+    if not await is_super_admin(user_id):
+        await answer_editable(message, "❌ Только супер-админ может деактивировать подписки.")
+        return
+    
+    await state.set_state(AdminStates.remove_admin_wait_id)  # Переиспользуем состояние
+    await answer_editable(message, "Введите ID пользователя для деактивации подписки:")
+
+@admin_router.message(AdminStates.add_admin_wait_id, F.text)
+async def activate_subscription_confirm(message: types.Message, state: FSMContext):
+    """Подтверждение активации подписки."""
+    user_id = message.from_user.id
+    try:
+        target_user_id = int(message.text)
+        
+        # Запрашиваем длительность подписки
+        await answer_editable(message, 
+            f"Пользователь: {target_user_id}\n\n"
+            "Выберите длительность подписки:\n"
+            "1 - 1 месяц\n"
+            "3 - 3 месяца\n"
+            "12 - 1 год\n\n"
+            "Введите номер (1, 3 или 12):")
+        
+        # Сохраняем ID пользователя для следующего шага
+        await state.update_data(target_user_id=target_user_id, action='activate')
+        
+    except ValueError:
+        await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
+        await state.set_state(AdminStates.main)
+        kb = await admin_main_kb(user_id)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+@admin_router.message(AdminStates.remove_admin_wait_id, F.text)
+async def deactivate_subscription_confirm(message: types.Message, state: FSMContext):
+    """Подтверждение деактивации подписки."""
+    user_id = message.from_user.id
+    try:
+        target_user_id = int(message.text)
+        
+        # Сразу деактивируем подписку
+        await deactivate_subscription(target_user_id)
+        await log_action(user_id, f"Деактивировал подписку пользователя {target_user_id}")
+        await answer_editable(message, f"✅ Подписка пользователя {target_user_id} деактивирована.")
+        
+    except ValueError:
+        await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
+    finally:
+        await state.set_state(AdminStates.main)
+        kb = await admin_main_kb(user_id)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+# Обработчик для ввода длительности подписки
+@admin_router.message(F.text.in_(["1", "3", "12"]))
+async def subscription_duration_handler(message: types.Message, state: FSMContext):
+    """Обработка выбора длительности подписки."""
+    user_id = message.from_user.id
+    data = await state.get_data()
+    
+    if data.get('action') == 'activate' and 'target_user_id' in data:
+        target_user_id = data['target_user_id']
+        duration = int(message.text)
+        
+        # Активируем подписку
+        await activate_premium_subscription(target_user_id, duration, f"Активировано админом {user_id}")
+        await log_action(user_id, f"Активировал премиум подписку для пользователя {target_user_id} на {duration} месяцев")
+        
+        await answer_editable(message, f"✅ Премиум подписка активирована для пользователя {target_user_id} на {duration} месяцев.")
+        
+        await state.set_state(AdminStates.main)
+        kb = await admin_main_kb(user_id)
+        await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+@admin_router.message(F.text == "⬅️ Назад в админку")
+async def back_to_admin_menu(message: types.Message, state: FSMContext):
+    """Возврат в главное меню админки."""
+    await state.set_state(AdminStates.main)
+    kb = await admin_main_kb(message.from_user.id)
+    await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
 

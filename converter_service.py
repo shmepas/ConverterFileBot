@@ -41,9 +41,22 @@ class FileConverter:
     def convert_to_mp3(self, input_path: str, output_path: str) -> str:
         """Конвертирует файл в MP3."""
         if input_path.lower().endswith((".mp3", ".wav", ".ogg")):
-            # Аудио файл - используем ffmpeg
-            import asyncio
-            asyncio.run(convert_audio_ffmpeg_async(input_path, output_path))
+            # Аудио файл - используем ffmpeg синхронно
+            try:
+                import subprocess
+                cmd = [
+                    "ffmpeg", "-y", "-i", input_path,
+                    "-acodec", "libmp3lame", "-ab", "128k",
+                    output_path
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"FFmpeg error: {e}")
+            except FileNotFoundError:
+                # Fallback к moviepy если ffmpeg не найден
+                clip = VideoFileClip(input_path)
+                clip.audio.write_audiofile(output_path, verbose=False, logger=None)
+                clip.close()
         else:
             # Видео файл - извлекаем аудио
             clip = VideoFileClip(input_path)
@@ -75,13 +88,14 @@ class FileConverter:
         """Конвертирует видео в GIF."""
         try:
             import asyncio
+            # Используем улучшенную функцию с адаптивными настройками
             asyncio.run(convert_video_to_gif_ffmpeg_async(
-                input_path, output_path, width=480, fps=12
+                input_path, output_path, width=360, fps=10, quality="high"
             ))
         except Exception:
-            # Fallback к moviepy
+            # Fallback к moviepy с улучшенными параметрами
             clip = VideoFileClip(input_path)
-            clip.write_gif(output_path, fps=12)
+            clip.write_gif(output_path, fps=10, program='ffmpeg')  # Используем ffmpeg для лучшего качества
             clip.close()
         
         return output_path
