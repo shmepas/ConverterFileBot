@@ -120,6 +120,67 @@ async def menu_cmd(message: types.Message, state: FSMContext):
     await answer_editable(message, "Главное меню 👇", reply_markup=kb)
 
 # ------------------------------
+# /reload - Перезагрузка кода (только для супер-админа)
+# ------------------------------
+@user_privatka_router.message(Command("reload"))
+async def reload_cmd(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем права супер-админа
+    if not await is_super_admin(user_id):
+        await message.answer("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    await log_action(user_id, "Выполнил команду /reload")
+    
+    try:
+        # Импортируем модули для перезагрузки
+        import importlib
+        import sys
+        
+        # Список модулей для перезагрузки
+        modules_to_reload = [
+            'handlers.user_privatka',
+            'handlers.adminka', 
+            'handlers.user_reply',
+            'handlers.formats',
+            'converter_service',
+            'utils',
+            'data_base.db'
+        ]
+        
+        reloaded_modules = []
+        
+        for module_name in modules_to_reload:
+            if module_name in sys.modules:
+                try:
+                    module = sys.modules[module_name]
+                    importlib.reload(module)
+                    reloaded_modules.append(module_name)
+                    print(f"🔄 Перезагружен модуль: {module_name}")
+                except Exception as e:
+                    print(f"❌ Ошибка при перезагрузке {module_name}: {e}")
+        
+        success_msg = f"""✅ **Код успешно перезагружен!**
+
+🔄 Перезагружено модулей: {len(reloaded_modules)}
+
+📋 Перезагруженные модули:
+{chr(10).join(f"• {mod}" for mod in reloaded_modules)}
+
+🚀 Теперь бот использует обновленный код!"""
+        
+        await message.answer(success_msg, parse_mode="Markdown")
+        
+    except Exception as e:
+        error_msg = f"""❌ **Ошибка при перезагрузке кода**
+
+🔍 Ошибка: {str(e)}
+
+💡 Возможно, нужно перезапустить бота вручную."""
+        await message.answer(error_msg, parse_mode="Markdown")
+
+# ------------------------------
 # Универсальная кнопка "Назад"
 # ------------------------------
 @user_privatka_router.message(F.text.in_(["⬅️ Назад в меню", "назад"]))
@@ -137,7 +198,7 @@ async def back_handler(message: types.Message, state: FSMContext):
             os.remove(file_path)
         except OSError:
             pass
-    
+        
     # Очищаем state
     await state.clear()
     
