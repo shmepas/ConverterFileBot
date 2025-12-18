@@ -62,7 +62,7 @@ async def shutdown():
     except Exception:
         pass
     await bot.session.close()
-    print("\033[91mБот остановлен ✅\033[0m")
+    print("\033[91mБот остановлен\033[0m")
     # Завершаем процесс
     sys.exit(0)
 
@@ -88,7 +88,7 @@ async def main():
 
     # Логируем запуск
     await log_system_event("Бот запущен системой")
-    print("\033[92mБот запущен ✅\033[0m")
+    print("\033[92mБот запущен\033[0m")
 
     try:
         await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)

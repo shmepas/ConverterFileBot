@@ -244,18 +244,52 @@ async def is_admin(user_id: int) -> bool:
     return result
 
 async def add_admin(user_id: int):
+    """Добавляет пользователя в админы с проверками"""
     print(f"[ADMIN DEBUG] add_admin called for user_id: {user_id}")
     async with aiosqlite.connect(DB_PATH) as db:
+        # Проверяем существование пользователя
+        async with db.execute("SELECT user_id, is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            user = await cursor.fetchone()
+            
+        if not user:
+            print(f"[ADMIN DEBUG] User {user_id} not found in database")
+            return False, "Пользователь не найден в базе данных"
+        
+        # Проверяем, не является ли уже админом
+        if user[1] == 1:  # user[1] это is_admin
+            print(f"[ADMIN DEBUG] User {user_id} is already admin")
+            return False, "Пользователь уже является админом"
+        
+        # Добавляем в админы
         await db.execute("UPDATE users SET is_admin = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
-    print(f"[ADMIN DEBUG] add_admin completed for user_id: {user_id}")
+        print(f"[ADMIN DEBUG] add_admin completed for user_id: {user_id}")
+        
+    return True, f"Пользователь {user_id} добавлен как админ"
 
 async def remove_admin(user_id: int):
+    """Удаляет пользователя из админов с проверками"""
     print(f"[ADMIN DEBUG] remove_admin called for user_id: {user_id}")
     async with aiosqlite.connect(DB_PATH) as db:
+        # Проверяем существование пользователя
+        async with db.execute("SELECT user_id, is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            user = await cursor.fetchone()
+            
+        if not user:
+            print(f"[ADMIN DEBUG] User {user_id} not found in database")
+            return False, "Пользователь не найден в базе данных"
+        
+        # Проверяем, является ли админом
+        if user[1] == 0:  # user[1] это is_admin
+            print(f"[ADMIN DEBUG] User {user_id} is not admin")
+            return False, "Пользователь не является админом"
+        
+        # Удаляем из админов
         await db.execute("UPDATE users SET is_admin = 0 WHERE user_id = ?", (user_id,))
         await db.commit()
-    print(f"[ADMIN DEBUG] remove_admin completed for user_id: {user_id}")
+        print(f"[ADMIN DEBUG] remove_admin completed for user_id: {user_id}")
+        
+    return True, f"Пользователь {user_id} удален из админов"
 
 async def init_super_admin(user_id: int):
     print(f"[ADMIN DEBUG] init_super_admin called for user_id: {user_id}")

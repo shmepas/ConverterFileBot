@@ -316,9 +316,14 @@ async def show_subscriptions_stats(message: types.Message, state: FSMContext):
 async def add_admin_confirm(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text)
-        await add_admin(user_id)
-        await log_action(message.from_user.id, f"Добавил пользователя {user_id} как админа")
-        await answer_editable(message, f"✅ Пользователь {user_id} добавлен как админ.")
+        success, result_message = await add_admin(user_id)
+        await log_action(message.from_user.id, f"Попытка добавить пользователя {user_id} как админа: {result_message}")
+        
+        if success:
+            await answer_editable(message, f"✅ {result_message}")
+        else:
+            await answer_editable(message, f"❌ {result_message}")
+            
     except ValueError:
         await log_action(message.from_user.id, f"Попытался добавить админа с неверным ID: {message.text}")
         await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
@@ -344,9 +349,14 @@ async def remove_admin_start(message: types.Message, state: FSMContext):
 async def remove_admin_confirm(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text)
-        await remove_admin(user_id)
-        await log_action(message.from_user.id, f"Удалил пользователя {user_id} из админов")
-        await answer_editable(message, f"✅ Пользователь {user_id} удален из админов.")
+        success, result_message = await remove_admin(user_id)
+        await log_action(message.from_user.id, f"Попытка удалить пользователя {user_id} из админов: {result_message}")
+        
+        if success:
+            await answer_editable(message, f"✅ {result_message}")
+        else:
+            await answer_editable(message, f"❌ {result_message}")
+            
     except ValueError:
         await log_action(message.from_user.id, f"Попытался удалить админа с неверным ID: {message.text}")
         await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
@@ -373,7 +383,7 @@ async def send_logs_page(message: types.Message, state: FSMContext):
     if not logs:
         await answer_editable(message, "📭 Логов пока нет.", reply_markup=ReplyKeyboardRemove())
         return
-
+    
     total = len(logs)
     total_pages = (total - 1) // PAGE_SIZE + 1
     page = max(1, min(page, total_pages))
