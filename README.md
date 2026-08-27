@@ -1,4 +1,4 @@
-#  Telegram Bot for File Conversion & Subscriptions
+**#  Telegram Bot for File Conversion & Subscriptions**
 
 Асинхронный Telegram-бот для конвертации файлов с продвинутой системой подписок, ролевой моделью и аналитикой. Проект демонстрирует навыки проектирования реляционных баз данных, асинхронного программирования и создания масштабируемой backend-архитектуры.
 
@@ -84,3 +84,7 @@ JOIN users u ON s.user_id = u.user_id
 WHERE s.is_active = 1
 ORDER BY s.end_date ASC;
 ```
+
+
+**🚀 Установка и локальный запуск**
+Клонируйте репозиторий:
