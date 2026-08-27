@@ -5,7 +5,6 @@
 [![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)](https://www.python.org/)
 [![aiogram](https://img.shields.io/badge/aiogram-3.x-green.svg)](https://docs.aiogram.dev/)
 [![Database](https://img.shields.io/badge/Database-SQLite_(Async)-orange.svg)](https://www.sqlite.org/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## **🎯 О проекте**
 **Этот проект является образовательным и имеет множество недостатков и нуждается во множестве доработок** 
