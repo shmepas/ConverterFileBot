@@ -1,5 +1,6 @@
 import os
 import tempfile
+from html import escape
 import traceback
 import zipfile
 import shutil
@@ -794,16 +795,16 @@ async def view_all_subscriptions(message: types.Message, state: FSMContext):
             await answer_editable(message, "📭 Подписок пока нет.")
             return
 
-        text = "📊 **Все подписки:**\n\n"
+        text = "📊 <b>Все подписки:</b>\n\n"
         for sub in subscriptions:
-            username = sub.get('username', 'Неизвестно')
-            first_name = sub.get('first_name', '')
-            plan_type = sub.get('plan_type', 'free')
+            username = sub.get('username') or 'Неизвестно'
+            first_name = sub.get('first_name') or ''
+            plan_type = sub.get('plan_type') or 'free'
             is_active = sub.get('is_active', 0)
             status = "✅ Активна" if is_active else "❌ Неактивна"
 
-            text += f"👤 {first_name} (@{username})\n"
-            text += f"📋 Тариф: {plan_type}\n"
+            text += f"👤 {escape(str(first_name))} (@{escape(str(username))})\n"
+            text += f"📋 Тариф: {escape(str(plan_type))}\n"
             text += f"🔄 Статус: {status}\n\n"
 
         # Возвращаемся в меню управления подписками
@@ -814,10 +815,10 @@ async def view_all_subscriptions(message: types.Message, state: FSMContext):
         )
         kb = kb_builder.as_markup(resize_keyboard=True)
 
-        await answer_editable(message, text, parse_mode="Markdown", reply_markup=kb)
+        await answer_editable(message, text, parse_mode="HTML", reply_markup=kb)
 
     except Exception as e:
-        await answer_editable(message, f"❌ Ошибка при получении подписок: {str(e)}")
+        await answer_editable(message, f"❌ Ошибка при получении подписок: {escape(str(e))}")
 
 @admin_router.message(F.text == "⏳ Ожидающие платежи")
 async def view_pending_payments(message: types.Message, state: FSMContext):
@@ -835,20 +836,20 @@ async def view_pending_payments(message: types.Message, state: FSMContext):
             await answer_editable(message, "📭 Ожидающих платежей нет.")
             return
 
-        text = "⏳ **Ожидающие платежи:**\n\n"
+        text = "⏳ <b>Ожидающие платежи:</b>\n\n"
         for payment in payments:
             payment_id = payment.get('id')
-            username = payment.get('username', 'Неизвестно')
-            first_name = payment.get('first_name', '')
+            username = payment.get('username') or 'Неизвестно'
+            first_name = payment.get('first_name') or ''
             amount = payment.get('amount', 0)
-            plan_duration = payment.get('plan_duration', '')
-            created_at = payment.get('created_at', '')
+            plan_duration = payment.get('plan_duration') or ''
+            created_at = payment.get('created_at') or ''
 
-            text += f"🆔 ID: {payment_id}\n"
-            text += f"👤 {first_name} (@{username})\n"
-            text += f"💰 Сумма: {amount} ₽\n"
-            text += f"📅 Период: {plan_duration}\n"
-            text += f"🕒 Создан: {created_at}\n\n"
+            text += f"🆔 ID: {escape(str(payment_id))}\n"
+            text += f"👤 {escape(str(first_name))} (@{escape(str(username))})\n"
+            text += f"💰 Сумма: {escape(str(amount))} ₽\n"
+            text += f"📅 Период: {escape(str(plan_duration))}\n"
+            text += f"🕒 Создан: {escape(str(created_at))}\n\n"
 
         # Возвращаемся в меню управления подписками
         kb_builder = ReplyKeyboardBuilder()
@@ -858,10 +859,10 @@ async def view_pending_payments(message: types.Message, state: FSMContext):
         )
         kb = kb_builder.as_markup(resize_keyboard=True)
 
-        await answer_editable(message, text, parse_mode="Markdown", reply_markup=kb)
+        await answer_editable(message, text, parse_mode="HTML", reply_markup=kb)
 
     except Exception as e:
-        await answer_editable(message, f"❌ Ошибка при получении платежей: {str(e)}")
+        await answer_editable(message, f"❌ Ошибка при получении платежей: {escape(str(e))}")
 
 @admin_router.message(F.text == "✅ Активировать подписку")
 async def activate_subscription_start(message: types.Message, state: FSMContext):
