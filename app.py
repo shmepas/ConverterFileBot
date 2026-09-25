@@ -12,6 +12,7 @@ from handlers.user_reply import user_reply_router
 from middlewares.logging_middleware import LoggingMiddleware
 from handlers.formats import formats_router
 from handlers.logs_router import logs_router
+from handlers.tickets import ticket_router
 
 load_dotenv(find_dotenv())
 
@@ -38,6 +39,7 @@ dp.update.middleware(LoggingMiddleware())
 # --------------------------
 # Подключаем роутеры
 # --------------------------
+dp.include_router(ticket_router)
 dp.include_router(user_privatka_router)
 dp.include_router(admin_router)
 dp.include_router(formats_router)

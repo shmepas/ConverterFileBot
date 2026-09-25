@@ -118,6 +118,27 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_date ON payments(user_id, date DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payment_history_status_created ON payment_history(status, created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active_end ON subscriptions(is_active, end_date)")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            admin_reply TEXT,
+            replied_by INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_support_tickets_status_created "
+            "ON support_tickets(status, created_at DESC)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_support_tickets_user_created "
+            "ON support_tickets(user_id, created_at DESC)"
+        )
         await db.commit()
 
         # Миграция для обновления существующих таблиц
@@ -368,6 +389,99 @@ async def has_admin_access(user_id: int) -> bool:
         ) as cursor:
             row = await cursor.fetchone()
             return bool(row and row[0])
+
+
+async def get_admin_user_ids() -> list[int]:
+    """Return all regular and super-admin IDs for support notifications."""
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with db.execute(
+            "SELECT user_id FROM users WHERE is_admin = 1 "
+            "UNION SELECT user_id FROM super_admin ORDER BY user_id"
+        ) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
+
+
+async def create_support_ticket(user_id: int, message: str) -> int:
+    """Create a support ticket and return its ID."""
+    clean_message = message.strip()
+    if not clean_message or len(clean_message) > 1800:
+        raise ValueError("Ticket message must contain 1 to 1800 characters")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "INSERT INTO support_tickets "
+            "(user_id, message, status, created_at, updated_at) "
+            "VALUES (?, ?, 'open', ?, ?)",
+            (user_id, clean_message, now, now),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_support_tickets(limit: int = 20, *, user_id: int | None = None,
+                              include_closed: bool = False) -> list[dict]:
+    limit = max(1, min(int(limit), 100))
+    query = (
+        "SELECT t.id, t.user_id, t.message, t.status, t.admin_reply, "
+        "t.replied_by, t.created_at, t.updated_at, u.username, u.first_name "
+        "FROM support_tickets t LEFT JOIN users u ON u.user_id = t.user_id"
+    )
+    clauses: list[str] = []
+    params: list[object] = []
+    if user_id is not None:
+        clauses.append("t.user_id = ?")
+        params.append(user_id)
+    if not include_closed:
+        clauses.append("t.status != 'closed'")
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY t.created_at DESC, t.id DESC LIMIT ?"
+    params.append(limit)
+
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, params) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_support_ticket(ticket_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT t.id, t.user_id, t.message, t.status, t.admin_reply, "
+            "t.replied_by, t.created_at, t.updated_at, u.username, u.first_name "
+            "FROM support_tickets t LEFT JOIN users u ON u.user_id = t.user_id "
+            "WHERE t.id = ?",
+            (ticket_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def reply_to_support_ticket(ticket_id: int, admin_id: int, reply: str) -> bool:
+    clean_reply = reply.strip()
+    if not clean_reply or len(clean_reply) > 1800:
+        raise ValueError("Ticket reply must contain 1 to 1800 characters")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "UPDATE support_tickets SET status = 'answered', admin_reply = ?, "
+            "replied_by = ?, updated_at = ? WHERE id = ? AND status = 'open'",
+            (clean_reply, admin_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ticket_id),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def close_support_ticket(ticket_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "UPDATE support_tickets SET status = 'closed', updated_at = ? "
+            "WHERE id = ? AND status != 'closed'",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ticket_id),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
 
 async def get_all_users():
     async with aiosqlite.connect(DB_PATH) as db:

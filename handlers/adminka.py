@@ -85,7 +85,8 @@ async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
         )
         kb_builder.row(
             KeyboardButton(text="🧾 Все платежи"),
-            KeyboardButton(text="🎞 Форматы")
+            KeyboardButton(text="🎞 Форматы"),
+            KeyboardButton(text="🎫 Тикеты")
         )
         kb_builder.row(
             KeyboardButton(text="📊 Статистика производительности"),
@@ -100,8 +101,9 @@ async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
         kb_builder.row(
             KeyboardButton(text="💎 Просмотр подписок"),
             KeyboardButton(text="🎞 Форматы"),
-            KeyboardButton(text="⬅️ Закрыть админку")
+            KeyboardButton(text="🎫 Тикеты")
         )
+        kb_builder.row(KeyboardButton(text="⬅️ Закрыть админку"))
     return kb_builder.as_markup(resize_keyboard=True)
 
 # ------------------------------

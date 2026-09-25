@@ -48,7 +48,9 @@ async def build_dynamic_keyboard(user_id: int, admin_open: bool = False) -> type
         "💰 Вариант оплаты",
         "🎞 Форматы",
         "💳 Платежи",
-        "👤 Моя роль"
+        "👤 Моя роль",
+        "🎫 Создать тикет",
+        "📨 Мои тикеты",
     ]
 
     # Добавляем основные кнопки по 2 в ряд для единообразия
@@ -75,12 +77,14 @@ async def build_dynamic_keyboard(user_id: int, admin_open: bool = False) -> type
                     types.KeyboardButton(text="➕ Добавить админа"),
                     types.KeyboardButton(text="➖ Удалить админа")
                 )
+                kb_builder.row(types.KeyboardButton(text="🎫 Тикеты"))
             else:
                 # Обычный админ видит только просмотр логов
                 kb_builder.row(
                     types.KeyboardButton(text="📜 Просмотр логов"),
                     types.KeyboardButton(text="💎 Просмотр подписок")
                 )
+                kb_builder.row(types.KeyboardButton(text="🎫 Тикеты"))
             kb_builder.row(types.KeyboardButton(text="⬅️ Закрыть админку"))
         else:
             # Кнопка открытия админки
@@ -771,7 +775,7 @@ async def contact_developer_handler(message: types.Message, state: FSMContext):
 
     contact_text = """🆘 **Связь с разработчиком**
 
-Если у вас возникли проблемы с ботом или есть предложения по улучшению, вы можете связаться со мной:
+Если у вас возникли проблемы с ботом или есть предложения, создайте тикет кнопкой «🎫 Создать тикет» — я отвечу здесь, в боте. Также можно связаться со мной напрямую:
 
 👤 **Telegram:** @elfiienlied
 

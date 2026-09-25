@@ -16,7 +16,8 @@ def main_menu_kb():
         keyboard=[
             [KeyboardButton(text="📘 Меню"), KeyboardButton(text="ℹ️ О боте")],
             [KeyboardButton(text="💳 Вариант оплаты"), KeyboardButton(text="💳 Платежи")],
-            [KeyboardButton(text="🎞 Форматы"), KeyboardButton(text="📎 Отправить файл")]
+            [KeyboardButton(text="🎞 Форматы"), KeyboardButton(text="📎 Отправить файл")],
+            [KeyboardButton(text="🎫 Создать тикет"), KeyboardButton(text="📨 Мои тикеты")]
         ],
         resize_keyboard=True
     )
