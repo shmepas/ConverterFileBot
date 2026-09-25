@@ -1,4 +1,5 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 PAGE_SIZE = 20
 
