@@ -333,7 +333,7 @@ async def payment_option_handler(message: types.Message, state: FSMContext):
 💳 Банковские карты • 💰 QIWI • 🟡 ЮMoney • ₿ Криптовалюты
 
 🎯 **Готово к покупке?**
-Для оформления подписки нажмите "🆘 Связь с разработчиком" и напишите @claperonn
+Для оформления подписки нажмите "🆘 Связь с разработчиком" и напишите @elfiienlied
 
 ⏰ **Специальное предложение:** Первый месяц со скидкой 20%!"""
 
@@ -773,7 +773,7 @@ async def contact_developer_handler(message: types.Message, state: FSMContext):
 
 Если у вас возникли проблемы с ботом или есть предложения по улучшению, вы можете связаться со мной:
 
-👤 **Telegram:** @claperonn
+👤 **Telegram:** @elfiienlied
 
 📝 **При обращении укажите:**
 - Описание проблемы
