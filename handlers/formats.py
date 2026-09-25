@@ -1,5 +1,6 @@
 import os
-import traceback
+import tempfile
+import asyncio
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -72,13 +73,21 @@ async def convert_file(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Проверка лимитов конвертации
+    # Проверяем тариф и размер до списания дневной квоты.
     limits = await db.check_user_limits(user_id)
-    
-    # Проверяем лимит конвертаций для бесплатных пользователей
+    file_size = getattr(file_obj, "file_size", 0) or 0
+    if file_size > limits['max_file_size']:
+        await message.answer(
+            f"🚫 Файл слишком большой: {file_size // (1024*1024)} МБ. "
+            f"Лимит тарифа: {limits['max_file_size'] // (1024*1024)} МБ."
+        )
+        await state.clear()
+        return
+
+    charged = False
     if not limits['is_premium']:
-        if not await db.increment_conversion_count(user_id):
-            # Лимит исчерпан
+        charged = await db.increment_conversion_count(user_id)
+        if not charged:
             limit_message = f"""🚫 **Дневной лимит исчерпан!**
 
 📊 **Ваш статус:**
@@ -97,34 +106,29 @@ async def convert_file(message: types.Message, state: FSMContext):
 💰 **Стоимость:** от 299₽/месяц
 
 Для покупки подписки нажмите "💰 Вариант оплаты" в меню"""
-            
+
             await message.answer(limit_message, parse_mode="Markdown")
             await state.clear()
             return
 
-    # Проверка размера файла
-    file_size = getattr(file_obj, "file_size", 0)
-    if file_size > limits['max_file_size']:
-        await message.answer(f"🚫 Файл слишком большой для вашего тарифа!\n\n📄 Размер файла: {file_size // (1024*1024)} МБ\n🎯 Лимит: {limits['max_file_size'] // (1024*1024)} МБ")
-        await state.clear()
-        return
-
-    import tempfile
-    temp_dir = tempfile.gettempdir()
-    file_name = getattr(file_obj, "file_name", f"tempfile_{file_obj.file_id}")
-    file_path = os.path.join(temp_dir, file_name)
+    work_dir = tempfile.mkdtemp(prefix=f"converter_user_{user_id}_")
+    file_path = os.path.join(work_dir, "input")
+    output_path = None
 
     try:
         # Скачиваем файл
         file_info = await message.bot.get_file(file_obj.file_id)
+        original_name = getattr(file_obj, "file_name", None) or file_info.file_path or "upload.bin"
+        extension = os.path.splitext(original_name)[1][:16]
+        file_path = os.path.join(work_dir, f"input{extension}")
         await message.bot.download_file(file_info.file_path, destination=file_path)
 
         # Используем централизованный сервис конвертации
-        output_path = file_converter.convert_file(file_path, fmt)
+        output_path = await asyncio.to_thread(file_converter.convert_file, file_path, fmt, user_id)
 
         # Отправляем результат пользователю
         await message.answer_document(FSInputFile(output_path), caption=f"✅ Файл конвертирован в {fmt}")
-        
+
         # Для бесплатных пользователей показываем информацию об оставшихся конвертациях
         if not limits['is_premium']:
             final_count = await db.get_daily_conversion_count(user_id)
@@ -132,11 +136,13 @@ async def convert_file(message: types.Message, state: FSMContext):
             await message.answer(f"📊 Конвертация выполнена!\n\nОсталось конвертаций на сегодня: {remaining}/5")
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка конвертации:\n<code>{traceback.format_exc()}</code>", parse_mode="HTML")
+        if charged:
+            await db.decrement_conversion_count(user_id)
+        await message.answer("❌ Не удалось обработать файл. Проверьте формат файла и попробуйте снова.")
 
     finally:
         # Очищаем временные файлы
-        file_converter.cleanup_files(file_path, locals().get('output_path'))
+        file_converter.cleanup_files(file_path, output_path, work_dir)
         await state.clear()
 
 # --- Кнопка "Назад" ---

@@ -1,12 +1,13 @@
 import aiosqlite
 from datetime import datetime
 import os
-import sqlite3
 
-DB_PATH = "data_base/bot_database.db"
+DB_PATH = os.path.join(os.path.dirname(__file__), "bot_database.db")
 
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("PRAGMA journal_mode = WAL")
+        await db.execute("PRAGMA foreign_keys = ON")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -113,6 +114,10 @@ async def init_db():
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_user_actions_user_timestamp ON user_actions(user_id, timestamp DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_date ON payments(user_id, date DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_payment_history_status_created ON payment_history(status, created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_active_end ON subscriptions(is_active, end_date)")
         await db.commit()
 
         # Миграция для обновления существующих таблиц
@@ -120,10 +125,29 @@ async def init_db():
             # Проверяем, есть ли старая версия таблицы daily_conversion_counters
             cursor = await db.execute("PRAGMA table_info(daily_conversion_counters)")
             columns = await cursor.fetchall()
-            
-            # Если user_id является PRIMARY KEY, пересоздаём таблицу
-            if columns and any(col[5] == 1 for col in columns if col[1] == 'user_id'):  # col[5] - is_pk
+
+            primary_key_columns = [column for column in columns if column[5]]
+            # Older versions keyed this table by user_id alone; the current
+            # schema uses the composite key (user_id, date).
+            if len(primary_key_columns) == 1 and primary_key_columns[0][1] == "user_id":
                 print("Миграция таблицы daily_conversion_counters...")
+                column_names = {column[1] for column in columns}
+                if "date" in column_names:
+                    cursor = await db.execute(
+                        "SELECT user_id, date, conversion_count FROM daily_conversion_counters"
+                    )
+                    old_rows = await cursor.fetchall()
+                elif "last_reset" in column_names:
+                    cursor = await db.execute(
+                        "SELECT user_id, conversion_count, last_reset FROM daily_conversion_counters"
+                    )
+                    old_rows = await cursor.fetchall()
+                else:
+                    cursor = await db.execute(
+                        "SELECT user_id, conversion_count FROM daily_conversion_counters"
+                    )
+                    old_rows = await cursor.fetchall()
+
                 await db.execute("DROP TABLE IF EXISTS daily_conversion_counters")
                 await db.execute("""
                 CREATE TABLE daily_conversion_counters (
@@ -134,21 +158,39 @@ async def init_db():
                     PRIMARY KEY (user_id, date)
                 )
                 """)
+                today = datetime.now().strftime("%Y-%m-%d")
+                for row in old_rows:
+                    if "date" in column_names:
+                        user_id, counter_date, count = row
+                    elif "last_reset" in column_names:
+                        user_id, count, last_reset = row
+                        counter_date = (last_reset or today)[:10]
+                    else:
+                        user_id, count = row
+                        counter_date = today
+                    if counter_date:
+                        await db.execute(
+                            "INSERT OR REPLACE INTO daily_conversion_counters "
+                            "(user_id, date, conversion_count) VALUES (?, ?, ?)",
+                            (user_id, counter_date, count or 0),
+                        )
                 await db.commit()
                 print("Миграция завершена")
         except Exception as e:
             print(f"Ошибка миграции: {e}")
 
 async def add_user(user_id: int, username: str, first_name: str, last_name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            exists = await cursor.fetchone()
-        if not exists:
-            await db.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, username, first_name, last_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            await db.commit()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("""
+            INSERT INTO users (user_id, username, first_name, last_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                first_name = excluded.first_name,
+                last_name = excluded.last_name
+        """, (user_id, username or "", first_name or "", last_name or "",
+              datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        await db.commit()
 
 async def log_action(user_id: int, action: str, username: str = None, first_name: str = None, last_name: str = None):
     """Логирование действий с улучшенной обработкой ошибок."""
@@ -191,7 +233,7 @@ async def get_user_logs(limit: int = 50):
     # Валидация лимита
     if not isinstance(limit, int) or limit <= 0 or limit > 1000:
         limit = 50
-    
+
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
@@ -250,21 +292,21 @@ async def add_admin(user_id: int):
         # Проверяем существование пользователя
         async with db.execute("SELECT user_id, is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
-            
+
         if not user:
             print(f"[ADMIN DEBUG] User {user_id} not found in database")
             return False, "Пользователь не найден в базе данных"
-        
+
         # Проверяем, не является ли уже админом
         if user[1] == 1:  # user[1] это is_admin
             print(f"[ADMIN DEBUG] User {user_id} is already admin")
             return False, "Пользователь уже является админом"
-        
+
         # Добавляем в админы
         await db.execute("UPDATE users SET is_admin = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
         print(f"[ADMIN DEBUG] add_admin completed for user_id: {user_id}")
-        
+
     return True, f"Пользователь {user_id} добавлен как админ"
 
 async def remove_admin(user_id: int):
@@ -274,21 +316,21 @@ async def remove_admin(user_id: int):
         # Проверяем существование пользователя
         async with db.execute("SELECT user_id, is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
-            
+
         if not user:
             print(f"[ADMIN DEBUG] User {user_id} not found in database")
             return False, "Пользователь не найден в базе данных"
-        
+
         # Проверяем, является ли админом
         if user[1] == 0:  # user[1] это is_admin
             print(f"[ADMIN DEBUG] User {user_id} is not admin")
             return False, "Пользователь не является админом"
-        
+
         # Удаляем из админов
         await db.execute("UPDATE users SET is_admin = 0 WHERE user_id = ?", (user_id,))
         await db.commit()
         print(f"[ADMIN DEBUG] remove_admin completed for user_id: {user_id}")
-        
+
     return True, f"Пользователь {user_id} удален из админов"
 
 async def init_super_admin(user_id: int):
@@ -314,6 +356,18 @@ async def is_super_admin(user_id: int) -> bool:
     is_super = result is not None
     print(f"[ADMIN DEBUG] is_super_admin check for user_id: {user_id} -> {is_super}")
     return is_super
+
+
+async def has_admin_access(user_id: int) -> bool:
+    """Check either admin role in one database round trip."""
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with db.execute(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE user_id = ? AND is_admin = 1) "
+            "OR EXISTS(SELECT 1 FROM super_admin WHERE user_id = ?)",
+            (user_id, user_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return bool(row and row[0])
 
 async def get_all_users():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -346,6 +400,19 @@ async def get_user_payments(user_id: int, limit: int = 50):
             return [dict(row) for row in rows]
 
 
+async def get_all_payments(limit: int = 500):
+    """Returns recent payments for the admin payment history screen."""
+    limit = max(1, min(int(limit), 1000))
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, user_id, amount, type, description, date "
+            "FROM payments ORDER BY date DESC, id DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
         # -----------------------------
 # Обратная связь / поддержка
 # -----------------------------
@@ -358,12 +425,12 @@ async def add_feedback(name: str, email: str, message: str, user_id: int | None 
         return False
     if not message or not isinstance(message, str) or len(message.strip()) == 0:
         return False
-    
+
     # Ограничиваем длину полей
     name = name.strip()[:100]
     email = email.strip()[:200]
     message = message.strip()[:1000]
-    
+
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -386,24 +453,24 @@ async def reset_daily_counters():
     """Сбрасывает счетчики конвертаций (для cron или ручного запуска)."""
     from datetime import datetime
     yesterday = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)).strftime("%Y-%m-%d")
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM daily_conversion_counters WHERE date < ?", (yesterday,))
         await db.commit()
         print(f"[RESET DEBUG] Daily counters reset for dates before {yesterday}")
-        
+
 async def get_feedbacks(limit: int = 100):
     """Получение обратной связи с улучшенной производительностью."""
     # Валидация лимита
     if not isinstance(limit, int) or limit <= 0 or limit > 1000:
         limit = 100
-    
+
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             # Добавляем индекс для ускорения (если его нет)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_feedbacks_id ON feedbacks(id)")
-            
+
             async with db.execute(
                 "SELECT id, user_id, name, email, message, status, created_at FROM feedbacks ORDER BY id DESC LIMIT ?",
                 (limit,)
@@ -442,7 +509,7 @@ async def get_all_subscriptions(limit: int = 100):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
-            SELECT s.user_id, u.username, u.first_name, s.plan_type, s.is_active, 
+            SELECT s.user_id, u.username, u.first_name, s.plan_type, s.is_active,
                    s.start_date, s.end_date, s.created_at
             FROM subscriptions s
             JOIN users u ON s.user_id = u.user_id
@@ -470,7 +537,7 @@ async def get_pending_payments(limit: int = 50):
 async def mark_payment_completed(payment_id: int, admin_user_id: int, admin_notes: str = ""):
     """Отмечает платеж как завершенный и активирует подписку."""
     from datetime import datetime
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         # Получаем информацию о платеже
         async with db.execute(
@@ -480,38 +547,38 @@ async def mark_payment_completed(payment_id: int, admin_user_id: int, admin_note
             payment = await cursor.fetchone()
             if not payment:
                 return False, "Платеж не найден или уже обработан"
-        
+
         user_id, plan_duration = payment
-        
+
         # Определяем длительность подписки
         duration_months = 1
         if plan_duration == "3_months":
             duration_months = 3
         elif plan_duration == "1_year":
             duration_months = 12
-        
+
         # Активируем подписку
         await activate_premium_subscription(user_id, duration_months, admin_notes)
-        
+
         # Обновляем статус платежа
         await db.execute("""
-            UPDATE payment_history 
+            UPDATE payment_history
             SET status = 'completed', admin_notes = ?, processed_at = ?
             WHERE id = ?
         """, (admin_notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), payment_id))
         await db.commit()
-        
+
         return True, f"Подписка активирована для пользователя {user_id}"
 
 async def activate_premium_subscription(user_id: int, duration_months: int = 1, admin_notes: str = ""):
     """Активирует премиум подписку для пользователя."""
     from datetime import datetime, timedelta
-    
+
     print(f"[SUBSCRIPTION DEBUG] Activating premium subscription for user_id: {user_id}, duration: {duration_months} months")
-    
+
     start_date = datetime.now()
     end_date = start_date + timedelta(days=30 * duration_months)
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         # Сначала проверяем, есть ли пользователь в базе
         async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -523,16 +590,16 @@ async def activate_premium_subscription(user_id: int, duration_months: int = 1, 
                     INSERT INTO users (user_id, username, first_name, last_name, created_at, is_admin)
                     VALUES (?, '', '', '', ?, 0)
                 """, (user_id, start_date.strftime("%Y-%m-%d %H:%M:%S")))
-        
+
         # Активируем подписку
         await db.execute("""
-            INSERT OR REPLACE INTO subscriptions 
+            INSERT OR REPLACE INTO subscriptions
             (user_id, plan_type, is_active, start_date, end_date, updated_at)
             VALUES (?, 'premium', 1, ?, ?, CURRENT_TIMESTAMP)
         """, (user_id, start_date.strftime("%Y-%m-%d %H:%M:%S"), end_date.strftime("%Y-%m-%d %H:%M:%S")))
         await db.commit()
         print(f"[SUBSCRIPTION DEBUG] Subscription activated for user_id: {user_id}")
-        
+
         # Логируем активацию
         await db.execute("""
             INSERT INTO payment_history (user_id, amount, payment_type, plan_duration, status, admin_notes, processed_at)
@@ -560,7 +627,7 @@ async def deactivate_subscription(user_id: int):
 async def get_user_subscription(user_id: int) -> dict:
     """Получает информацию о подписке пользователя."""
     print(f"[DEBUG SUBSCRIPTION] get_user_subscription called for user {user_id}")
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -597,10 +664,10 @@ async def create_free_subscription(user_id: int):
 async def check_user_limits(user_id: int) -> dict:
     """Проверяет лимиты пользователя и возвращает информацию о подписке."""
     print(f"[DEBUG LIMITS] check_user_limits called for user {user_id}")
-    
+
     subscription = await get_user_subscription(user_id)
     print(f"[DEBUG LIMITS] User subscription: {subscription}")
-    
+
     if subscription['plan_type'] == 'premium' and subscription['is_active']:
         print(f"[DEBUG LIMITS] User {user_id} has active premium subscription")
         # Премиум подписка - без ограничений
@@ -618,7 +685,7 @@ async def check_user_limits(user_id: int) -> dict:
         # Бесплатная подписка - с ограничениями
         today_count = await get_daily_conversion_count(user_id)
         print(f"[DEBUG LIMITS] Today's conversion count for user {user_id}: {today_count}")
-        
+
         limits = {
             'plan_type': 'free',
             'is_premium': False,
@@ -633,67 +700,38 @@ async def check_user_limits(user_id: int) -> dict:
 
 async def get_daily_conversion_count(user_id: int) -> int:
     """Получает количество конвертаций пользователя за сегодня."""
-    from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
-    
-    print(f"[DEBUG COUNT] get_daily_conversion_count called for user {user_id}, today: {today}")
-    
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            # Сначала проверим, есть ли таблица и какие в ней данные
-            print(f"[DEBUG COUNT] Checking table structure...")
-            async with db.execute("PRAGMA table_info(daily_conversion_counters)") as cursor:
-                columns = await cursor.fetchall()
-                print(f"[DEBUG COUNT] Table columns: {columns}")
-            
-            # Проверим все записи для этого пользователя
-            print(f"[DEBUG COUNT] Checking all records for user {user_id}")
-            async with db.execute("SELECT * FROM daily_conversion_counters WHERE user_id = ?", (user_id,)) as cursor:
-                all_records = await cursor.fetchall()
-                print(f"[DEBUG COUNT] All records for user {user_id}: {all_records}")
-            
-            # Проверим записи за сегодня
-            print(f"[DEBUG COUNT] Checking records for today: {today}")
-            async with db.execute(
-                "SELECT conversion_count FROM daily_conversion_counters WHERE user_id = ? AND date = ?",
-                (user_id, today)
-            ) as cursor:
-                row = await cursor.fetchone()
-                result = row[0] if row else 0
-                print(f"[DEBUG COUNT] Found row: {row}, returning: {result}")
-                return result
-                
-    except Exception as e:
-        print(f"[DEBUG COUNT] Error in get_daily_conversion_count: {e}")
-        return 0
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with db.execute(
+            "SELECT conversion_count FROM daily_conversion_counters WHERE user_id = ? AND date = ?",
+            (user_id, today),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
 
 async def increment_conversion_count(user_id: int) -> bool:
-    """Увеличивает счетчик конвертаций. Возвращает False если лимит исчерпан."""
-    from datetime import datetime
-    
-    print(f"[CONVERSION DEBUG] Checking limits for user_id: {user_id}")
-    
-    # Проверяем лимиты перед увеличением
-    limits = await check_user_limits(user_id)
-    print(f"[CONVERSION DEBUG] User limits: {limits}")
-    
-    if not limits['is_premium'] and limits['current_count'] >= limits['daily_limit']:
-        print(f"[CONVERSION DEBUG] User {user_id} reached daily limit")
-        return False  # Лимит исчерпан
-    
+    """Atomically checks the daily quota and increments the counter."""
     today = datetime.now().strftime("%Y-%m-%d")
-    print(f"[CONVERSION DEBUG] Today's date: {today}")
-    
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         try:
-            print(f"[CONVERSION DEBUG] Attempting to increment conversion count for user {user_id} on {today}")
-            
-            # Сначала проверяем, есть ли запись
-            async with db.execute("SELECT conversion_count FROM daily_conversion_counters WHERE user_id = ? AND date = ?", (user_id, today)) as cursor:
-                existing = await cursor.fetchone()
-                print(f"[CONVERSION DEBUG] Existing record: {existing}")
-            
-            # Используем правильный синтаксис SQLite для UPSERT
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute(
+                "SELECT plan_type, is_active FROM subscriptions WHERE user_id = ?",
+                (user_id,),
+            ) as cursor:
+                subscription = await cursor.fetchone()
+            is_premium = bool(subscription and subscription[0] == "premium" and subscription[1])
+
+            if not is_premium:
+                async with db.execute(
+                    "SELECT conversion_count FROM daily_conversion_counters WHERE user_id = ? AND date = ?",
+                    (user_id, today),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row and int(row[0]) >= 5:
+                    await db.rollback()
+                    return False
+
             await db.execute("""
                 INSERT INTO daily_conversion_counters (user_id, date, conversion_count)
                 VALUES (?, ?, 1)
@@ -701,54 +739,35 @@ async def increment_conversion_count(user_id: int) -> bool:
                     conversion_count = conversion_count + 1,
                     last_reset = CURRENT_TIMESTAMP
             """, (user_id, today))
-            
             await db.commit()
-            print(f"[CONVERSION DEBUG] Successfully incremented count for user_id: {user_id}")
-            
-        except Exception as e:
-            print(f"[CONVERSION DEBUG] UPSERT failed, trying alternative approach: {e}")
-            # Если UPSERT не работает, используем альтернативный подход
-            try:
-                # Сначала пытаемся обновить существующую запись
-                result = await db.execute("""
-                    UPDATE daily_conversion_counters 
-                    SET conversion_count = conversion_count + 1, 
-                        last_reset = CURRENT_TIMESTAMP
-                    WHERE user_id = ? AND date = ?
-                """, (user_id, today))
-                await db.commit()
-            
-                # Если ничего не обновилось, создаём новую запись
-                if db.total_changes == 0:
-                    print(f"[CONVERSION DEBUG] No existing record found, inserting new one")
-                    await db.execute("""
-                        INSERT INTO daily_conversion_counters (user_id, date, conversion_count)
-                        VALUES (?, ?, 1)
-                    """, (user_id, today))
-                    await db.commit()
-                
-                print(f"[CONVERSION DEBUG] Alternative approach completed for user_id: {user_id}")
-                
-            except Exception as e2:
-                print(f"[CONVERSION DEBUG] Alternative approach also failed: {e2}")
-                return False
-    
-    # Проверяем результат
-    final_count = await get_daily_conversion_count(user_id)
-    print(f"[CONVERSION DEBUG] Final count after increment: {final_count}")
-    
-    return True
+            return True
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def decrement_conversion_count(user_id: int) -> None:
+    """Refund a quota unit when a reserved conversion does not complete."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute(
+            "UPDATE daily_conversion_counters "
+            "SET conversion_count = CASE WHEN conversion_count > 0 THEN conversion_count - 1 ELSE 0 END "
+            "WHERE user_id = ? AND date = ?",
+            (user_id, today),
+        )
+        await db.commit()
 
 async def get_subscription_status_text(user_id: int) -> str:
     """Возвращает текст статуса подписки для отображения пользователю."""
     print(f"[DEBUG STATUS] get_subscription_status_text called for user {user_id}")
-    
+
     subscription = await get_user_subscription(user_id)
     print(f"[DEBUG STATUS] User subscription: {subscription}")
-    
+
     limits = await check_user_limits(user_id)
     print(f"[DEBUG STATUS] Final limits for status text: {limits}")
-    
+
     if limits['is_premium']:
         print(f"[DEBUG STATUS] Returning premium status for user {user_id}")
         return f"""💎 **Премиум подписка**

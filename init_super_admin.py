@@ -1,7 +1,11 @@
 import asyncio
+import os
 from data_base.db import init_super_admin
 
-SUPER_ADMIN_ID = 1121684677  # <-- твой Telegram ID
+try:
+    SUPER_ADMIN_ID = int(os.environ["SUPER_ADMIN_ID"])
+except (KeyError, ValueError) as exc:
+    raise RuntimeError("Set SUPER_ADMIN_ID to the Telegram user ID before running this script") from exc
 
 async def main():
     await init_super_admin(SUPER_ADMIN_ID)

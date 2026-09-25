@@ -3,36 +3,40 @@ from kbds import reply
 import asyncio
 import subprocess
 import os
-import requests
-from kbds.admin_reply import admin_kb, super_admin_kb
 from data_base.db import is_admin, is_super_admin
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from data_base import db as _db
+
+try:
+    import imageio_ffmpeg
+    FFMPEG_BINARY = os.getenv("FFMPEG_BINARY") or imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    FFMPEG_BINARY = os.getenv("FFMPEG_BINARY") or "ffmpeg"
 
 
 def _get_gif_recommendations(input_path: str) -> dict:
     """
     Анализирует видео и возвращает рекомендации для создания оптимального GIF.
-    
+
     Args:
         input_path: путь к исходному видео
-    
+
     Returns:
         dict с рекомендациями: width, fps, quality
     """
     # Получаем размер файла для оценки
     file_size = os.path.getsize(input_path) if os.path.exists(input_path) else 0
-    
+
     # Размер файла в MB
     size_mb = file_size / (1024 * 1024)
-    
+
     # Базовые рекомендации
     recommendations = {
         "width": 480,
         "fps": 12,
         "quality": "medium"
     }
-    
+
     # Корректируем на основе размера файла
     if size_mb < 5:  # Маленькие файлы - высокое качество
         recommendations["width"] = 480
@@ -46,7 +50,7 @@ def _get_gif_recommendations(input_path: str) -> dict:
         recommendations["width"] = 320
         recommendations["fps"] = 10
         recommendations["quality"] = "low"
-    
+
     return recommendations
 
 
@@ -62,8 +66,9 @@ async def answer_editable(message: types.Message, text: str, reply_markup=None, 
     last = await _db.get_last_bot_message(user_id)
     bot = message.bot
 
-    # Try to edit existing bot message
-    if last and last.get('chat_id') == chat_id:
+    # Telegram only accepts inline keyboards when editing a message.
+    can_edit_markup = reply_markup is None or isinstance(reply_markup, types.InlineKeyboardMarkup)
+    if can_edit_markup and last and last.get('chat_id') == chat_id:
         try:
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=last.get('message_id'), reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
             return
@@ -84,7 +89,8 @@ async def send_editable_raw(bot, user_id: int, chat_id: int, text: str, reply_ma
     Variant that accepts bot and user/chat ids directly.
     """
     last = await _db.get_last_bot_message(user_id)
-    if last and last.get('chat_id') == chat_id:
+    can_edit_markup = reply_markup is None or isinstance(reply_markup, types.InlineKeyboardMarkup)
+    if can_edit_markup and last and last.get('chat_id') == chat_id:
         try:
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=last.get('message_id'), reply_markup=reply_markup, parse_mode=parse_mode)
             return
@@ -120,7 +126,7 @@ async def convert_audio_ffmpeg_async(input_path: str, output_path: str):
     Асинхронно конвертирует аудио файл в нужный формат с помощью ffmpeg.
     """
     cmd = [
-        "ffmpeg",
+        FFMPEG_BINARY,
         "-y",  # перезаписывать без подтверждения
         "-i", input_path,
         output_path
@@ -147,7 +153,7 @@ async def compress_video_ffmpeg_async(input_path: str, output_path: str, *, crf:
     vf_expr = f"scale='min({max_width},iw)':-2"  # Adjusted for new width
     # Use movflags +faststart for web-friendly mp4 and sane defaults to limit size
     cmd = [
-        "ffmpeg",
+        FFMPEG_BINARY,
         "-y",
         "-i", input_path,
         "-vf", vf_expr,
@@ -173,7 +179,7 @@ async def compress_video_ffmpeg_async(input_path: str, output_path: str, *, crf:
 async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *, width: int = None, fps: int = None, quality: str = None):
     """
     Конвертирует видео в высококачественный GIF с использованием анализа исходного видео.
-    
+
     Args:
         input_path: путь к исходному видео
         output_path: путь для сохранения GIF
@@ -183,17 +189,17 @@ async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *
     """
     # Получаем рекомендации на основе анализа видео
     recommendations = _get_gif_recommendations(input_path)
-    
+
     # Используем рекомендации или переданные параметры
     final_width = width if width is not None else recommendations["width"]
     final_fps = fps if fps is not None else recommendations["fps"]
     final_quality = quality if quality is not None else recommendations["quality"]
 
     palette_path = output_path + '.palette.png'
-    
+
     # Улучшенные параметры масштабирования
     scale_expr = f"scale='min({final_width},iw)':-2:flags=lanczos"
-    
+
     # Настройки качества на основе параметра final_quality
     if final_quality == "high":
         palette_gen_opts = "stats_mode=full"
@@ -204,11 +210,11 @@ async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *
     else:  # low
         palette_gen_opts = "stats_mode=single"
         palette_use_opts = "dither=none"
-    
+
     # Первый проход: генерация оптимизированной палитры
     cmd_palette = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-vf", f"fps={final_fps},{scale_expr},palettegen={palette_gen_opts}", 
+        FFMPEG_BINARY, "-y", "-i", input_path,
+        "-vf", f"fps={final_fps},{scale_expr},palettegen={palette_gen_opts}",
         palette_path
     ]
 
@@ -229,12 +235,12 @@ async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *
 
     # Второй проход: создание GIF с оптимизированной палитрой
     cmd_use = [
-        "ffmpeg", "-y", "-i", input_path, "-i", palette_path,
+        FFMPEG_BINARY, "-y", "-i", input_path, "-i", palette_path,
         "-lavfi", f"fps={final_fps},{scale_expr} [x]; [x][1:v] paletteuse={palette_use_opts}",
         "-loop", "0",  # Бесконечное воспроизведение
         output_path
     ]
-    
+
     process = await asyncio.create_subprocess_exec(
         *cmd_use,
         stdout=asyncio.subprocess.PIPE,
@@ -251,7 +257,7 @@ async def convert_video_to_gif_ffmpeg_async(input_path: str, output_path: str, *
 
     if process.returncode != 0:
         raise RuntimeError(f"FFmpeg gif conversion error:\n{stderr.decode()}")
-    
+
     # Проверяем размер файла и при необходимости дополнительно оптимизируем
     try:
         if os.path.exists(output_path):
@@ -268,28 +274,28 @@ async def _optimize_large_gif(gif_path: str, max_width: int, fps: int):
     Дополнительная оптимизация больших GIF файлов.
     """
     import tempfile
-    
+
     # Создаем временный файл для оптимизированной версии
     with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as tmp_file:
         temp_gif = tmp_file.name
-    
+
     try:
         # Применяем дополнительную оптимизацию
         optimize_cmd = [
-            "ffmpeg", "-y", "-i", gif_path,
+            FFMPEG_BINARY, "-y", "-i", gif_path,
             "-vf", f"scale='min({max_width * 0.8},iw)':-2:flags=lanczos,fps={max(8, fps - 2)}",
             "-gifflags", "-offsetting",  # Удаляет избыточные кадры
             "-loop", "0",
             temp_gif
         ]
-        
+
         process = await asyncio.create_subprocess_exec(
             *optimize_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         _, stderr = await process.communicate()
-        
+
         if process.returncode == 0:
             # Заменяем оригинальный файл оптимизированным
             import shutil
@@ -300,7 +306,7 @@ async def _optimize_large_gif(gif_path: str, max_width: int, fps: int):
                 os.remove(temp_gif)
             except Exception:
                 pass
-                
+
     except Exception:
         # В случае ошибки удаляем временный файл
         try:
@@ -308,46 +314,44 @@ async def _optimize_large_gif(gif_path: str, max_width: int, fps: int):
                 os.remove(temp_gif)
         except Exception:
             pass
-
-
 async def _optimize_large_gif(gif_path: str, original_width: int, original_fps: int):
     """
     Дополнительная оптимизация больших GIF файлов.
     """
     import tempfile
-    
+
     # Создаем временную оптимизированную версию
     temp_path = gif_path + '.opt'
-    
+
     try:
         # Более агрессивная оптимизация для больших файлов
         optimize_cmd = [
-            "ffmpeg", "-y", "-i", gif_path,
+            FFMPEG_BINARY, "-y", "-i", gif_path,
             "-vf", f"fps={max(original_fps-2, 6)},scale='min({max(original_width-60, 240)},iw)':-2:flags=lanczos",
             "-loop", "0",
             "-gifflags", "+transdiff",  # Улучшенное сжатие
             temp_path
         ]
-        
+
         process = await asyncio.create_subprocess_exec(
             *optimize_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
-        
+
         if process.returncode == 0:
             # Проверяем, что оптимизированная версия меньше
             original_size = os.path.getsize(gif_path)
             optimized_size = os.path.getsize(temp_path)
-            
+
             if optimized_size < original_size * 0.8:  # Если удалось уменьшить на 20%
                 # Заменяем оригинал оптимизированной версией
                 os.replace(temp_path, gif_path)
             else:
                 # Удаляем временный файл если оптимизация не помогла
                 os.remove(temp_path)
-        
+
     except Exception:
         # В случае ошибки удаляем временный файл
         try:
@@ -355,50 +359,3 @@ async def _optimize_large_gif(gif_path: str, original_width: int, original_fps: 
                 os.remove(temp_path)
         except Exception:
             pass
-
-
-async def upload_file_fallback(file_path: str) -> str:
-    """
-    Попытка загрузить файл на несколько публичных сервисов и вернуть ссылку.
-    Использует последовательность провайдеров: transfer.sh, file.io, 0x0.st.
-    В случае неудачи бросает исключение.
-    """
-    def _upload():
-        filename = os.path.basename(file_path)
-        # transfer.sh (PUT)
-        try:
-            with open(file_path, 'rb') as f:
-                url = f"https://transfer.sh/{filename}"
-                resp = requests.put(url, data=f, timeout=120)
-                if resp.status_code == 200:
-                    return resp.text.strip()
-        except Exception:
-            pass
-
-        # file.io (POST)
-        try:
-            with open(file_path, 'rb') as f:
-                resp = requests.post('https://file.io', files={'file': f}, timeout=120)
-                if resp.status_code == 200:
-                    j = resp.json()
-                    # file.io returns {'success': True, 'link': '...'} or similar
-                    for key in ('link', 'url'):
-                        if key in j:
-                            return j[key]
-                    if 'success' in j and j.get('success') and 'key' in j:
-                        return j.get('key')
-        except Exception:
-            pass
-
-        # 0x0.st (POST)
-        try:
-            with open(file_path, 'rb') as f:
-                resp = requests.post('https://0x0.st', files={'file': f}, timeout=120)
-                if resp.status_code == 200:
-                    return resp.text.strip()
-        except Exception:
-            pass
-
-        raise RuntimeError('All upload providers failed')
-
-    return await asyncio.to_thread(_upload)

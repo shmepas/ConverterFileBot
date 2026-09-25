@@ -1,7 +1,5 @@
 import os
-import sys
 import asyncio
-import signal
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.bot import DefaultBotProperties
@@ -13,16 +11,25 @@ from handlers.adminka import admin_router
 from handlers.user_reply import user_reply_router
 from middlewares.logging_middleware import LoggingMiddleware
 from handlers.formats import formats_router
+from handlers.logs_router import logs_router
 
 load_dotenv(find_dotenv())
 
-ALLOWED_UPDATES = ['message', 'edited_message']
+ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query']
+
+TOKEN = os.getenv("TOKEN")
+try:
+    SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", ""))
+except ValueError as exc:
+    raise RuntimeError("SUPER_ADMIN_ID must be a valid Telegram user ID") from exc
+if not TOKEN:
+    raise RuntimeError("TOKEN is missing; configure it in the environment or .env file")
 
 # --------------------------
 # Инициализация бота
 # --------------------------
 bot = Bot(
-    token=os.getenv("TOKEN"),
+    token=TOKEN,
     default=DefaultBotProperties(parse_mode="HTML")
 )
 dp = Dispatcher(storage=MemoryStorage())
@@ -35,8 +42,7 @@ dp.include_router(user_privatka_router)
 dp.include_router(admin_router)
 dp.include_router(formats_router)
 dp.include_router(user_reply_router)
-
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID"))
+dp.include_router(logs_router)
 
 # --------------------------
 # Настройка базы и супер-админа
@@ -63,20 +69,6 @@ async def shutdown():
         pass
     await bot.session.close()
     print("\033[91mБот остановлен\033[0m")
-    # Завершаем процесс
-    sys.exit(0)
-
-def handle_exit(sig, frame):
-    # Используем ensure_future чтобы создать таск внутри события loop
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        asyncio.ensure_future(shutdown())
-    else:
-        # Если loop уже закрыт (редко)
-        sys.exit(0)
-
-signal.signal(signal.SIGINT, handle_exit)
-signal.signal(signal.SIGTERM, handle_exit)
 
 # --------------------------
 # Основная функция запуска

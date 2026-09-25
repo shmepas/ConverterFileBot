@@ -1,9 +1,9 @@
 import os
 import pypandoc
 from PIL import Image
-import shlex
 import subprocess
 from moviepy.editor import VideoFileClip
+from utils import FFMPEG_BINARY
 
 # pydub is optional on Windows; fallback to ffmpeg if not available
 try:
@@ -59,8 +59,10 @@ async def convert_file(src_path: str, target_format: str) -> str:
                 clip.close()
             except Exception:
                 # ffmpeg fallback
-                cmd = f'ffmpeg -y -i {shlex.quote(src_path)} -vn -acodec libmp3lame {shlex.quote(dst_path)}'
-                subprocess.run(cmd, shell=True, check=True)
+                subprocess.run([
+                    FFMPEG_BINARY, "-y", "-i", src_path, "-vn",
+                    "-acodec", "libmp3lame", dst_path,
+                ], check=True, capture_output=True)
             return dst_path
 
         # АУДИО → другой формат
@@ -70,8 +72,7 @@ async def convert_file(src_path: str, target_format: str) -> str:
                 sound.export(dst_path, format=target_format)
             else:
                 # ffmpeg fallback
-                cmd = f'ffmpeg -y -i {shlex.quote(src_path)} {shlex.quote(dst_path)}'
-                subprocess.run(cmd, shell=True, check=True)
+                subprocess.run([FFMPEG_BINARY, "-y", "-i", src_path, dst_path], check=True, capture_output=True)
             return dst_path
 
         else:

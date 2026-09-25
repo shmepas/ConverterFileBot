@@ -1,11 +1,13 @@
 import os
 import traceback
 import tempfile
+import uuid
 from aiogram import types, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.dispatcher.event.bases import SkipHandler
 import asyncio
 import time
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
@@ -15,6 +17,8 @@ from data_base.db import add_user, log_action, is_admin, is_super_admin, check_u
 from kbds import reply
 from utils import answer_editable
 from converter_service import file_converter
+from utiles.file_validator import file_validator
+from utiles.progress_tracker import progress_tracker
 
 user_privatka_router = Router()
 user_privatka_router.message.filter(lambda message: message.chat.type == "private")
@@ -36,17 +40,17 @@ class MenuStates(StatesGroup):
 # ------------------------------
 async def build_dynamic_keyboard(user_id: int, admin_open: bool = False) -> types.ReplyKeyboardMarkup:
     kb_builder = ReplyKeyboardBuilder()
-    
+
     # Основные кнопки (все одинакового размера)
     main_buttons = [
         "📋 Меню",
-        "ℹ️ О боте", 
+        "ℹ️ О боте",
         "💰 Вариант оплаты",
         "🎞 Форматы",
         "💳 Платежи",
         "👤 Моя роль"
     ]
-    
+
     # Добавляем основные кнопки по 2 в ряд для единообразия
     for i in range(0, len(main_buttons), 2):
         if i + 1 < len(main_buttons):
@@ -95,6 +99,7 @@ async def build_dynamic_keyboard(user_id: int, admin_open: bool = False) -> type
 @user_privatka_router.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    await state.clear()
     await state.set_state(MenuStates.main)
     await add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
@@ -125,32 +130,32 @@ async def menu_cmd(message: types.Message, state: FSMContext):
 @user_privatka_router.message(Command("reload"))
 async def reload_cmd(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    
+
     # Проверяем права супер-админа
     if not await is_super_admin(user_id):
         await message.answer("❌ У вас нет прав для выполнения этой команды.")
         return
 
     await log_action(user_id, "Выполнил команду /reload")
-    
+
     try:
         # Импортируем модули для перезагрузки
         import importlib
         import sys
-        
+
         # Список модулей для перезагрузки
         modules_to_reload = [
             'handlers.user_privatka',
-            'handlers.adminka', 
+            'handlers.adminka',
             'handlers.user_reply',
             'handlers.formats',
             'converter_service',
             'utils',
             'data_base.db'
         ]
-        
+
         reloaded_modules = []
-        
+
         for module_name in modules_to_reload:
             if module_name in sys.modules:
                 try:
@@ -160,7 +165,7 @@ async def reload_cmd(message: types.Message, state: FSMContext):
                     print(f"🔄 Перезагружен модуль: {module_name}")
                 except Exception as e:
                     print(f"❌ Ошибка при перезагрузке {module_name}: {e}")
-        
+
         success_msg = f"""✅ **Код успешно перезагружен!**
 
 🔄 Перезагружено модулей: {len(reloaded_modules)}
@@ -169,9 +174,9 @@ async def reload_cmd(message: types.Message, state: FSMContext):
 {chr(10).join(f"• {mod}" for mod in reloaded_modules)}
 
 🚀 Теперь бот использует обновленный код!"""
-        
+
         await message.answer(success_msg, parse_mode="Markdown")
-        
+
     except Exception as e:
         error_msg = f"""❌ **Ошибка при перезагрузке кода**
 
@@ -188,20 +193,20 @@ async def back_handler(message: types.Message, state: FSMContext):
     """Универсальный обработчик кнопки 'Назад' для всех состояний."""
     user_id = message.from_user.id
     await log_action(user_id, f"Нажал кнопку 'Назад' ({message.text})")
-    
+
     data = await state.get_data()
     file_path = data.get("file_path")
-    
+
     # Очищаем временный файл если он есть
     if file_path and os.path.exists(file_path):
         try:
             os.remove(file_path)
         except OSError:
             pass
-        
+
     # Очищаем state
     await state.clear()
-    
+
     # Возвращаемся в главное меню
     kb = await build_dynamic_keyboard(user_id)
     await answer_editable(message, "↩️ Возврат в главное меню", reply_markup=kb)
@@ -227,10 +232,10 @@ async def about_bot_handler(message: types.Message, state: FSMContext):
     await log_action(user_id, "Нажал кнопку 'О боте'")
     await state.set_state(MenuStates.main)  # Возвращаемся в главное меню
     kb = await build_dynamic_keyboard(user_id)
-    
+
     about_text = """ℹ️ **О боте**
 
-Я - бот для конвертации файлов различных форматов. 
+Я - бот для конвертации файлов различных форматов.
 
 🎯 **Возможности:**
 • Конвертация аудио (MP3, WAV, OGG)
@@ -251,7 +256,7 @@ async def about_bot_handler(message: types.Message, state: FSMContext):
 
 🔒 Максимальный размер файла: 20 МБ
 📧 Поддержка: через команду /support"""
-    
+
     await answer_editable(message, about_text, parse_mode="Markdown", reply_markup=kb)
 
 # ------------------------------
@@ -265,7 +270,7 @@ async def menu_handler(message: types.Message, state: FSMContext):
     await state.set_state(MenuStates.main)
     kb = await build_dynamic_keyboard(user_id)
     await answer_editable(message, "📋 Главное меню 👇", reply_markup=kb)
-    
+
 # ------------------------------
 # Кнопка "Моя роль"
 # ------------------------------
@@ -274,25 +279,25 @@ async def my_role_handler(message: types.Message, state: FSMContext):
     """Показывает роль пользователя и статус подписки."""
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку 'Моя роль'")
-    
+
     # Определяем роль
     role = "👤 Пользователь"
     if await is_super_admin(user_id):
         role = "👑 Супер-администратор"
     elif await is_admin(user_id):
         role = "🛡️ Администратор"
-    
+
     # Получаем статус подписки
     subscription_text = await get_subscription_status_text(user_id)
-    
+
     # Формируем полное сообщение
     full_text = f"""**Ваша роль:** {role}
 
 {subscription_text}"""
-    
+
     kb = await build_dynamic_keyboard(user_id)
     await answer_editable(message, full_text, parse_mode="Markdown", reply_markup=kb)
-    
+
 # ------------------------------
 # Кнопка "Вариант оплаты"
 # ------------------------------
@@ -303,7 +308,7 @@ async def payment_option_handler(message: types.Message, state: FSMContext):
     await log_action(user_id, "Нажал кнопку 'Вариант оплаты'")
     await state.set_state(MenuStates.payment)
     kb = await build_dynamic_keyboard(user_id)
-    
+
     payment_text = """💳 **💎 Премиум подписка - Расширьте возможности!**
 
 🔄 **Ваш текущий тариф - БЕСПЛАТНЫЙ:**
@@ -331,7 +336,7 @@ async def payment_option_handler(message: types.Message, state: FSMContext):
 Для оформления подписки нажмите "🆘 Связь с разработчиком" и напишите @claperonn
 
 ⏰ **Специальное предложение:** Первый месяц со скидкой 20%!"""
-    
+
     await answer_editable(message, payment_text, parse_mode="Markdown", reply_markup=kb)
 
 # ------------------------------
@@ -342,14 +347,16 @@ async def admin_panel_handler(message: types.Message, state: FSMContext):
     """Открывает админскую панель для админов."""
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку 'Админка'")
-    
+
     # Проверяем права администратора
     if not (await is_admin(user_id) or await is_super_admin(user_id)):
         await answer_editable(message, "❌ У вас нет прав для доступа к админской панели.")
         return
 
     # Показываем админскую панель
-    kb = await build_dynamic_keyboard(user_id, admin_open=True)
+    await state.clear()
+    from handlers.adminka import admin_main_kb
+    kb = await admin_main_kb(user_id)
     await answer_editable(message, "🔧 Админская панель открыта 👇", reply_markup=kb)
 
 # ------------------------------
@@ -359,8 +366,9 @@ async def admin_panel_handler(message: types.Message, state: FSMContext):
 async def close_admin_panel_handler(message: types.Message, state: FSMContext):
     """Закрывает админскую панель."""
     user_id = message.from_user.id
+    await state.clear()
     await log_action(user_id, "Нажал кнопку 'Закрыть админку'")
-    
+
     # Проверяем права администратора
     if not (await is_admin(user_id) or await is_super_admin(user_id)):
         await answer_editable(message, "❌ У вас нет прав для доступа к админской панели.")
@@ -379,10 +387,10 @@ async def choose_format_handler(message: types.Message, state: FSMContext):
     """Запускает процесс выбора формата конвертации."""
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку '🎞 Форматы'")
-    
+
     data = await state.get_data()
     file_path = data.get("file_path")
-    
+
     if not file_path or not os.path.exists(file_path):
         await answer_editable(message, "⚠️ Сначала отправьте файл для конвертации!", reply_markup=reply.file_menu_kb())
         # Возвращаем в главное меню после показа предупреждения
@@ -399,69 +407,108 @@ async def choose_format_handler(message: types.Message, state: FSMContext):
 # ------------------------------
 @user_privatka_router.message(F.document)
 async def handle_file(message: types.Message, state: FSMContext):
+    if await state.get_state() == "FormatStates:waiting_file":
+        # Let the admin conversion router consume files during its format flow.
+        raise SkipHandler
     user_id = message.from_user.id
     print(f"[USER_PRIVATKA DEBUG] 📁 DOCUMENT RECEIVED via user_privatka.py for user {user_id}")
     print(f"[USER_PRIVATKA DEBUG] File name: {message.document.file_name}")
     print(f"[USER_PRIVATKA DEBUG] File size: {message.document.file_size}")
     print(f"[USER_PRIVATKA DEBUG] Current state: {await state.get_state()}")
     print(f"[USER_PRIVATKA DEBUG] File type: {message.document.mime_type}")
-    
+
     await log_action(user_id, f"Отправил файл: {message.document.file_name}")
-    
+
     file = message.document
     file_name = file.file_name
-    
-    # Безопасное именование файла - убираем небезопасные символы
-    import re
-    import time
-    safe_file_name = re.sub(r'[^\w\-_.]', '_', file_name)
-    timestamp = int(time.time())
-    file_path = f"downloads/{user_id}_{timestamp}_{safe_file_name}"
 
-    # Максимальный размер входящего файла: 20 МБ (супер-админам без ограничения)
-    MAX_INPUT_SIZE = 20 * 1024 * 1024
+    # Валидация имени файла
+    if not file_validator.validate_filename(file_name):
+        await answer_editable(message, "❌ Небезопасное имя файла. Попробуйте переименовать файл.")
+        return
+
+    # Безопасное именование файла
+    safe_file_name = file_validator.get_safe_filename(file_name, user_id)
+    timestamp = int(time.time())
+    file_path = os.path.join("downloads", f"{user_id}_{timestamp}_{uuid.uuid4().hex}_{safe_file_name}")
+
+    # Respect the current subscription limit before downloading the file.
+    limits = await db.check_user_limits(user_id)
+    max_input_size = limits["max_file_size"]
     file_size = getattr(file, "file_size", 0)
 
-    if file_size > MAX_INPUT_SIZE:
-        if await is_super_admin(user_id):
-            await answer_editable(message, f"⚠️ Ограничение входящего размера ({MAX_INPUT_SIZE // (1024*1024)} МБ) не применяется к супер-админу. Продолжаю загрузку.")
-        else:
-            await answer_editable(message, f"🚫 Входящий файл слишком большой ({file_size // (1024*1024)} МБ). Максимум: {MAX_INPUT_SIZE // (1024*1024)} МБ.")
-            # Возвращаем в главное меню
-            await state.set_state(MenuStates.main)
-            kb = await build_dynamic_keyboard(user_id)
-            await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
-            return
-    
+    if file_size > max_input_size:
+        await answer_editable(message, f"🚫 Файл слишком большой ({file_size // (1024*1024)} МБ). Лимит вашего тарифа: {max_input_size // (1024*1024)} МБ.")
+        await state.set_state(MenuStates.main)
+        kb = await build_dynamic_keyboard(user_id)
+        await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
+        return
+
     os.makedirs("downloads", exist_ok=True)
 
     try:
         await answer_editable(message, "⏳ Скачиваю файл...")
-        
+
         # Оптимизированное скачивание с таймаутом
         file_info = await message.bot.get_file(file.file_id)
-        
+
         # Проверяем размер файла более точно
         actual_size = file_info.file_size or file_size
-        if actual_size > MAX_INPUT_SIZE and not await is_super_admin(user_id):
-            await answer_editable(message, f"🚫 Файл слишком большой ({actual_size // (1024*1024)} МБ). Максимум: {MAX_INPUT_SIZE // (1024*1024)} МБ.")
+        if actual_size > max_input_size:
+            await answer_editable(message, f"🚫 Файл слишком большой ({actual_size // (1024*1024)} МБ). Лимит вашего тарифа: {max_input_size // (1024*1024)} МБ.")
             # Возвращаем в главное меню
             await state.set_state(MenuStates.main)
             kb = await build_dynamic_keyboard(user_id)
             await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
             return
-        
+
         # Скачиваем с оптимизированными параметрами
         await message.bot.download_file(
-            file_info.file_path, 
+            file_info.file_path,
             destination=file_path,
             timeout=300  # 5 минут таймаут
         )
-        
+
         # Проверяем, что файл действительно скачался
         if not os.path.exists(file_path):
             raise Exception("Файл не был скачан")
-            
+
+        # Валидация загруженного файла
+        print(f"🔍 Валидация загруженного файла: {file_path}")
+
+        # Определяем ожидаемый формат на основе MIME-типа
+        mime_type = file.mime_type
+        expected_format = "UNKNOWN"
+
+        if mime_type.startswith("audio/"):
+            expected_format = "MP3"
+        elif mime_type.startswith("video/"):
+            expected_format = "MP4"
+        elif mime_type == "image/gif":
+            expected_format = "GIF"
+        elif mime_type == "image/png":
+            expected_format = "PNG"
+        elif mime_type in ["image/jpeg", "image/jpg"]:
+            expected_format = "JPG"
+        elif mime_type == "application/pdf":
+            expected_format = "PDF"
+        elif mime_type in ["text/plain", "text/markdown"]:
+            expected_format = "TXT"
+
+        # Проводим валидацию исходного файла (не формата конвертации)
+        is_valid, error_message, validation_info = file_validator.full_validation(file_path, expected_format, user_id)
+
+        if not is_valid:
+            await answer_editable(message, f"❌ Файл не прошел валидацию: {error_message}")
+            # Удаляем невалидный файл
+            try:
+                os.remove(file_path)
+            except:
+                pass
+            return
+
+        print(f"✅ Файл прошел валидацию (время: {validation_info['validation_time']:.2f}с)")
+
     except TelegramBadRequest as e:
         msg = str(e)
         if "file is too big" in msg or "too big" in msg.lower():
@@ -480,8 +527,8 @@ async def handle_file(message: types.Message, state: FSMContext):
         kb = await build_dynamic_keyboard(user_id)
         await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
         return
-    except Exception as e:
-        await answer_editable(message, f"❌ Ошибка при скачивании файла: {str(e)}")
+    except Exception:
+        await answer_editable(message, "❌ Не удалось скачать или проверить файл. Попробуйте отправить его ещё раз.")
         # Возвращаем в главное меню
         await state.set_state(MenuStates.main)
         kb = await build_dynamic_keyboard(user_id)
@@ -490,11 +537,11 @@ async def handle_file(message: types.Message, state: FSMContext):
 
     await state.update_data(file_path=file_path)
     await state.set_state(MenuStates.waiting_format)
-    
+
     # Показываем сообщение с клавиатурой форматов
     await answer_editable(
-        message, 
-        f"📁 Файл '{file_name}' загружен!\n\n🎞 Теперь выберите формат для конвертации:", 
+        message,
+        f"📁 Файл '{file_name}' загружен!\n\n🎞 Теперь выберите формат для конвертации:",
         reply_markup=reply.format_choice_kb()
     )
 
@@ -508,7 +555,7 @@ async def user_format_selected_debug(message: types.Message, state: FSMContext):
     print(f"[USER_PRIVATKA DEBUG] 🎯 FORMAT SELECTED CALLED via user_privatka.py for user {user_id}")
     print(f"[USER_PRIVATKA DEBUG] Selected format: {message.text}")
     print(f"[USER_PRIVATKA DEBUG] Current state: {await state.get_state()}")
-    
+
     # Вызываем основную функцию
     await user_format_selected(message, state)
 async def user_format_selected(message: types.Message, state: FSMContext):
@@ -516,9 +563,9 @@ async def user_format_selected(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     current_state = await state.get_state()
     selected_format = message.text
-    
+
     print(f"[DEBUG MP3] user_format_selected called for user {user_id}, format: {selected_format}")
-    
+
     # Дополнительная проверка состояния
     if current_state != MenuStates.waiting_format:
         print(f"[DEBUG MP3] Unexpected state: {current_state}, expected: {MenuStates.waiting_format}")
@@ -530,10 +577,10 @@ async def user_format_selected(message: types.Message, state: FSMContext):
 
     print(f"[DEBUG MP3] Starting conversion process for format: {selected_format}")
     await log_action(user_id, f"Выбрал формат конвертации: {selected_format}")
-    
+
     data = await state.get_data()
     file_path = data.get("file_path")
-    
+
     if not file_path or not os.path.exists(file_path):
         await answer_editable(message, "❌ Файл не найден. Отправьте его заново.")
         # Возвращаем в главное меню
@@ -543,15 +590,15 @@ async def user_format_selected(message: types.Message, state: FSMContext):
         return
 
     fmt = message.text
-    
+
     # ПРОВЕРКА ЛИМИТОВ ПОДПИСКИ
     limits = await db.check_user_limits(user_id)
-    
+
     # Проверяем лимит конвертаций для бесплатных пользователей
     if not limits['is_premium']:
         print(f"[DEBUG MP3] User {user_id} is free user, checking limits for format {fmt}")
         print(f"[DEBUG MP3] Current limits: {limits}")
-        
+
         if not await db.increment_conversion_count(user_id):
             # Лимит исчерпан - предлагаем купить подписку
             limit_message = f"""🚫 **Дневной лимит исчерпан!**
@@ -572,7 +619,7 @@ async def user_format_selected(message: types.Message, state: FSMContext):
 💰 **Стоимость:** от 299₽/месяц
 
 Для покупки подписки нажмите "💰 Вариант оплаты" в меню 👇"""
-            
+
             await answer_editable(message, limit_message, parse_mode="Markdown")
             await state.set_state(MenuStates.main)
             kb = await build_dynamic_keyboard(user_id)
@@ -582,28 +629,36 @@ async def user_format_selected(message: types.Message, state: FSMContext):
             print(f"[DEBUG MP3] Successfully incremented conversion count for user {user_id}")
     else:
         print(f"[DEBUG MP3] User {user_id} is premium user, no limits")
-    
+
     # Проверяем размер файла в зависимости от подписки
     if os.path.exists(file_path):
         file_size = os.path.getsize(file_path)
         if file_size > limits['max_file_size']:
+            if not limits['is_premium']:
+                await db.decrement_conversion_count(user_id)
             await answer_editable(message, f"❌ Файл слишком большой для вашего тарифа!\n\n📄 Размер файла: {file_size // (1024*1024)} МБ\n🎯 Лимит: {limits['max_file_size'] // (1024*1024)} МБ")
             await state.set_state(MenuStates.main)
             kb = await build_dynamic_keyboard(user_id)
             await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
             return
-    
+
     output_path = None
-    
+
     try:
         print(f"[DEBUG MP3] Starting conversion for user {user_id}, format: {fmt}")
-        await answer_editable(message, "⏳ Конвертирую файл, это может занять время...")
-        
-        # Используем централизованный сервис конвертации
-        print(f"[DEBUG MP3] Calling file_converter.convert_file for format: {fmt}")
-        output_path = file_converter.convert_file(file_path, fmt)
+
+        # Создаем прогресс-трекер для этой конвертации
+        track_id = await progress_tracker.start_conversion_progress(user_id, message, fmt)
+
+        # Создаем callback для обновления прогресса
+        from utiles.progress_tracker import ConversionProgressCallback
+        progress_callback = ConversionProgressCallback(user_id, progress_tracker)
+
+        # Используем централизованный сервис конвертации с retry логикой и прогресс-баром
+        print(f"[DEBUG MP3] Calling file_converter.convert_file_with_retry for format: {fmt}")
+        output_path = await file_converter.convert_file_with_retry(file_path, fmt, user_id=user_id, progress_callback=progress_callback)
         print(f"[DEBUG MP3] Conversion completed, output path: {output_path}")
-        
+
         # Отправляем результат пользователю
         print(f"[DEBUG MP3] Sending result to user {user_id}")
         await message.answer_document(FSInputFile(output_path), caption=f"✅ Файл конвертирован в {fmt}")
@@ -612,7 +667,7 @@ async def user_format_selected(message: types.Message, state: FSMContext):
 
         # Для бесплатных пользователей показываем информацию об оставшихся конвертациях
         if not limits['is_premium']:
-            remaining = limits['remaining'] - 1 if limits['remaining'] > 0 else 0
+            remaining = max(0, limits['daily_limit'] - await db.get_daily_conversion_count(user_id))
             if remaining >= 0:
                 remaining_message = f"""📊 **Конвертация выполнена!**
 
@@ -629,6 +684,11 @@ async def user_format_selected(message: types.Message, state: FSMContext):
                 await answer_editable(message, remaining_message, parse_mode="Markdown")
 
     except Exception as e:
+        if not limits['is_premium']:
+            try:
+                await db.decrement_conversion_count(user_id)
+            except Exception:
+                pass
         # Логируем ошибку
         tb = traceback.format_exc()
         os.makedirs("logs", exist_ok=True)
@@ -638,21 +698,21 @@ async def user_format_selected(message: types.Message, state: FSMContext):
                 lf.write(tb)
         except Exception:
             pass
-        
+
         # Сохраняем в базу данных
         try:
             await log_action(user_id, f"Ошибка конвертации, см. {log_file}")
         except Exception:
             pass
-        
+
         # Уведомляем пользователя
         short = str(e)[:200]
         await answer_editable(message, f"❌ Ошибка конвертации: {short}\n(Полный лог сохранён)")
-    
+
     finally:
         # Очищаем временные файлы
         file_converter.cleanup_files(file_path, output_path)
-        
+
         # Возвращаем пользователя в главное меню с клавиатурой
         await state.set_state(MenuStates.main)
         kb = await build_dynamic_keyboard(user_id)
@@ -666,7 +726,7 @@ async def user_format_selected(message: types.Message, state: FSMContext):
 async def show_payments_handler(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку '💳 Платежи'")
-    
+
     try:
         payments = await db.get_user_payments(user_id)
     except Exception as e:
@@ -680,7 +740,7 @@ async def show_payments_handler(message: types.Message, state: FSMContext):
 
     # Получаем статус подписки
     subscription_text = await get_subscription_status_text(user_id)
-    
+
     if not payments:
         text = f"{subscription_text}\n\n📭 У вас пока нет записей о платежах."
     else:
@@ -695,7 +755,7 @@ async def show_payments_handler(message: types.Message, state: FSMContext):
 
         payments_text = "💳 Ваша история платежей:\n\n" + "\n".join(lines)
         text = f"{subscription_text}\n\n{payments_text}"
-    
+
     # Возвращаемся в главное меню после показа платежей
     await state.set_state(MenuStates.main)
     kb = await build_dynamic_keyboard(user_id)
@@ -708,7 +768,7 @@ async def show_payments_handler(message: types.Message, state: FSMContext):
 async def contact_developer_handler(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку '🆘 Связь с разработчиком'")
-    
+
     contact_text = """🆘 **Связь с разработчиком**
 
 Если у вас возникли проблемы с ботом или есть предложения по улучшению, вы можете связаться со мной:
@@ -721,7 +781,7 @@ async def contact_developer_handler(message: types.Message, state: FSMContext):
 - Время возникновения проблемы
 
 💬 Я постараюсь помочь вам в кратчайшие сроки!"""
-    
+
     await state.set_state(MenuStates.main)
     kb = await build_dynamic_keyboard(user_id)
     await answer_editable(message, contact_text.format(user_id=user_id), parse_mode="Markdown", reply_markup=kb)

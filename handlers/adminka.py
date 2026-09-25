@@ -2,8 +2,10 @@ import os
 import tempfile
 import traceback
 import zipfile
+import shutil
 import asyncio  # добавлен для асинхронного вызова ffmpeg
 import subprocess
+import time
 from kbds.reply import main_menu_kb
 from aiogram.exceptions import TelegramBadRequest
 
@@ -19,17 +21,31 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from moviepy.editor import VideoFileClip
-from utils import compress_video_ffmpeg_async, convert_video_to_gif_ffmpeg_async, upload_file_fallback, answer_editable
+from utils import FFMPEG_BINARY, compress_video_ffmpeg_async, convert_video_to_gif_ffmpeg_async, answer_editable
+from utiles.performance import get_conversion_stats, get_popular_formats
+from converter_service import file_converter
+from utiles.progress_tracker import progress_tracker
 
 from data_base.db import (
-    log_action, is_admin, is_super_admin,
-    add_admin, remove_admin, get_user_logs, get_user_payments,
+    log_action, is_admin, is_super_admin, has_admin_access,
+    add_admin, remove_admin, get_user_logs,
     get_all_subscriptions, get_pending_payments, mark_payment_completed,
+    get_all_payments,
     activate_premium_subscription, deactivate_subscription
 )
 
 admin_router = Router()
 PAGE_SIZE = 20
+
+
+async def _is_admin_user(message: types.Message) -> bool:
+    if message.chat.type != "private" or message.from_user is None:
+        return False
+    return await has_admin_access(message.from_user.id)
+
+
+# Admin handlers default to deny unless this filter confirms a privileged role.
+admin_router.message.filter(_is_admin_user)
 
 # ------------------------------
 # 💉 FIX: Клавиатура обычного пользователя
@@ -67,19 +83,21 @@ async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
             KeyboardButton(text="➖ Удалить админа")
         )
         kb_builder.row(
-            KeyboardButton(text="💳 Платежи"),
+            KeyboardButton(text="🧾 Все платежи"),
             KeyboardButton(text="🎞 Форматы")
         )
         kb_builder.row(
+            KeyboardButton(text="📊 Статистика производительности"),
             KeyboardButton(text="⬅️ Закрыть админку")
         )
     elif await is_admin(user_id):
         # Для обычного админа - просмотр подписок без управления
         kb_builder.row(
             KeyboardButton(text="📜 Просмотр логов"),
-            KeyboardButton(text="💳 Платежи")
+            KeyboardButton(text="🧾 Все платежи")
         )
         kb_builder.row(
+            KeyboardButton(text="💎 Просмотр подписок"),
             KeyboardButton(text="🎞 Форматы"),
             KeyboardButton(text="⬅️ Закрыть админку")
         )
@@ -103,7 +121,7 @@ def formats_kb() -> ReplyKeyboardMarkup:
 # ------------------------------
 async def convert_audio_ffmpeg_async(input_path: str, output_path: str):
     cmd = [
-        "ffmpeg",
+        FFMPEG_BINARY,
         "-y",
         "-i", input_path,
         "-vn",
@@ -149,6 +167,24 @@ async def show_my_role(message: types.Message):
         role = "👤 Пользователь"
     await message.answer(f"Ваша роль: {role}")
 
+
+@admin_router.message(F.text == "💎 Просмотр подписок")
+async def view_subscriptions_readonly(message: types.Message, state: FSMContext):
+    """Regular admins may view subscriptions but cannot manage them."""
+    await state.clear()
+    subscriptions = await get_all_subscriptions(limit=50)
+    if not subscriptions:
+        text = "📭 Подписок пока нет."
+    else:
+        rows = ["💎 Подписки (последние 50):", ""]
+        for subscription in subscriptions:
+            username = subscription.get("username")
+            label = f"@{username}" if username else str(subscription["user_id"])
+            status = "активна" if subscription.get("is_active") else "неактивна"
+            rows.append(f"{label} — {subscription.get('plan_type', 'free')}, {status}")
+        text = "\n".join(rows)
+    await answer_editable(message, text, reply_markup=await admin_main_kb(message.from_user.id))
+
 # ------------------------------
 # Добавление админа
 # ------------------------------
@@ -169,37 +205,18 @@ async def subscription_management_start(message: types.Message, state: FSMContex
         await log_action(message.from_user.id, "Попытался управлять подписками (нет прав супер-админа)")
         await answer_editable(message, "❌ Только супер-админ может управлять подписками.")
         return
-    
+
     await log_action(message.from_user.id, "Нажал кнопку '💎 Управление подписками'")
-    await state.set_state(AdminStates.subscription_management)
-    
-    management_text = """💎 **Управление подписками**
-
-Выберите действие:
-
-👤 **Активировать премиум подписку**
-Введите ID пользователя для активации премиум подписки
-
-🚫 **Деактивировать подписку**
-Введите ID пользователя для деактивации подписки
-
-📊 **Просмотр статистики**
-Просмотр всех подписок и статистики
-
-⬅️ **Назад в главное меню**
-Возврат в главное меню админки"""
-    
+    await state.clear()
     kb = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="👤 Активировать премиум")],
-            [KeyboardButton(text="🚫 Деактивировать подписку")],
-            [KeyboardButton(text="📊 Просмотр статистики")],
-            [KeyboardButton(text="⬅️ Назад в главное меню")]
+            [KeyboardButton(text="📊 Все подписки"), KeyboardButton(text="⏳ Ожидающие платежи")],
+            [KeyboardButton(text="✅ Активировать подписку"), KeyboardButton(text="❌ Деактивировать подписку")],
+            [KeyboardButton(text="⬅️ Назад в админку")],
         ],
         resize_keyboard=True
     )
-    
-    await answer_editable(message, management_text, parse_mode="Markdown", reply_markup=kb)
+    await answer_editable(message, "💎 Управление подписками. Выберите действие:", reply_markup=kb)
 
 @admin_router.message(AdminStates.subscription_management)
 async def subscription_management_handler(message: types.Message, state: FSMContext):
@@ -208,16 +225,16 @@ async def subscription_management_handler(message: types.Message, state: FSMCont
         await log_action(message.from_user.id, "Выбрал активацию премиум подписки")
         await state.set_state(AdminStates.activate_premium_wait_id)
         await answer_editable(message, "Введите ID пользователя для активации премиум подписки:")
-    
+
     elif message.text == "🚫 Деактивировать подписку":
         await log_action(message.from_user.id, "Выбрал деактивацию подписки")
         await state.set_state(AdminStates.deactivate_subscription_wait_id)
         await answer_editable(message, "Введите ID пользователя для деактивации подписки:")
-    
+
     elif message.text == "📊 Просмотр статистики":
         await log_action(message.from_user.id, "Выбрал просмотр статистики подписок")
         await show_subscriptions_stats(message, state)
-    
+
     elif message.text == "⬅️ Назад в главное меню":
         await log_action(message.from_user.id, "Вернулся в главное меню из управления подписками")
         await state.set_state(AdminStates.main)
@@ -269,16 +286,16 @@ async def show_subscriptions_stats(message: types.Message, state: FSMContext):
     """Показывает статистику подписок."""
     try:
         subscriptions = await get_all_subscriptions(limit=100)
-        
+
         if not subscriptions:
             await answer_editable(message, "📊 Статистика подписок:\n\nПока нет данных о подписках.")
             return
-        
+
         # Подсчитываем статистику
         total_users = len(subscriptions)
         premium_users = len([s for s in subscriptions if s.get('plan_type') == 'premium' and s.get('is_active')])
         free_users = total_users - premium_users
-        
+
         stats_text = f"""📊 **Статистика подписок**
 
 👥 **Всего пользователей:** {total_users}
@@ -287,7 +304,7 @@ async def show_subscriptions_stats(message: types.Message, state: FSMContext):
 
 📈 **Детализация:**
 """
-        
+
         # Добавляем детализацию по пользователям
         for sub in subscriptions[:10]:  # Показываем только первых 10
             user_id = sub.get('user_id', 'N/A')
@@ -295,18 +312,18 @@ async def show_subscriptions_stats(message: types.Message, state: FSMContext):
             plan_type = sub.get('plan_type', 'free')
             is_active = sub.get('is_active', 0)
             status = "✅ Активна" if is_active else "❌ Неактивна"
-            
+
             stats_text += f"• ID: {user_id} (@{username}) - {plan_type} ({status})\n"
-        
+
         if len(subscriptions) > 10:
             stats_text += f"\n... и ещё {len(subscriptions) - 10} пользователей"
-        
+
         await answer_editable(message, stats_text, parse_mode="Markdown")
-        
+
     except Exception as e:
         await log_action(message.from_user.id, f"Ошибка получения статистики подписок: {e}")
         await answer_editable(message, f"❌ Ошибка получения статистики: {e}")
-    
+
     finally:
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(message.from_user.id)
@@ -318,12 +335,12 @@ async def add_admin_confirm(message: types.Message, state: FSMContext):
         user_id = int(message.text)
         success, result_message = await add_admin(user_id)
         await log_action(message.from_user.id, f"Попытка добавить пользователя {user_id} как админа: {result_message}")
-        
+
         if success:
             await answer_editable(message, f"✅ {result_message}")
         else:
             await answer_editable(message, f"❌ {result_message}")
-            
+
     except ValueError:
         await log_action(message.from_user.id, f"Попытался добавить админа с неверным ID: {message.text}")
         await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
@@ -351,12 +368,12 @@ async def remove_admin_confirm(message: types.Message, state: FSMContext):
         user_id = int(message.text)
         success, result_message = await remove_admin(user_id)
         await log_action(message.from_user.id, f"Попытка удалить пользователя {user_id} из админов: {result_message}")
-        
+
         if success:
             await answer_editable(message, f"✅ {result_message}")
         else:
             await answer_editable(message, f"❌ {result_message}")
-            
+
     except ValueError:
         await log_action(message.from_user.id, f"Попытался удалить админа с неверным ID: {message.text}")
         await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
@@ -381,9 +398,11 @@ async def send_logs_page(message: types.Message, state: FSMContext):
     page = data.get("page", 1)
     logs = await get_user_logs(limit=500)
     if not logs:
-        await answer_editable(message, "📭 Логов пока нет.", reply_markup=ReplyKeyboardRemove())
+        builder = ReplyKeyboardBuilder()
+        builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
+        await answer_editable(message, "📭 Логов пока нет.", reply_markup=builder.as_markup(resize_keyboard=True))
         return
-    
+
     total = len(logs)
     total_pages = (total - 1) // PAGE_SIZE + 1
     page = max(1, min(page, total_pages))
@@ -406,14 +425,14 @@ async def send_logs_page(message: types.Message, state: FSMContext):
         navigation_buttons.append(KeyboardButton(text="⬅️ Назад"))
     if page < total_pages:
         navigation_buttons.append(KeyboardButton(text="▶️ Далее"))
-    
+
     # Добавляем навигационные кнопки в ряд
     if navigation_buttons:
         builder.row(*navigation_buttons)
-    
+
     # Добавляем кнопку выхода
     builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
-    
+
     kb = builder.as_markup(resize_keyboard=True)
     await answer_editable(message, text.strip(), reply_markup=kb)
     await state.update_data(page=page)
@@ -439,7 +458,7 @@ async def logs_navigation(message: types.Message, state: FSMContext):
 # ------------------------------
 # Просмотр платежей
 # ------------------------------
-@admin_router.message(F.text == "💳 Платежи")
+@admin_router.message(F.text == "🧾 Все платежи")
 async def view_payments_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку '💳 Платежи'")
@@ -450,9 +469,11 @@ async def view_payments_start(message: types.Message, state: FSMContext):
 async def send_payments_page(message: types.Message, state: FSMContext):
     data = await state.get_data()
     page = data.get("page", 1)
-    payments = await get_user_payments(limit=500)
+    payments = await get_all_payments(limit=500)
     if not payments:
-        await answer_editable(message, "📭 История платежей пока пуста.", reply_markup=ReplyKeyboardRemove())
+        builder = ReplyKeyboardBuilder()
+        builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
+        await answer_editable(message, "📭 История платежей пока пуста.", reply_markup=builder.as_markup(resize_keyboard=True))
         return
 
     total = len(payments)
@@ -465,7 +486,7 @@ async def send_payments_page(message: types.Message, state: FSMContext):
 
     text = f"💳 История платежей — страница {page}/{total_pages}\n\n"
     for p in page_payments:
-        text += f"👤 {p.get('user_id')} | 💰 {p.get('amount')} | 🕒 {p.get('timestamp')}\n\n"
+        text += f"👤 {p.get('user_id')} | 💰 {p.get('amount')} | 🕒 {p.get('date')}\n\n"
 
     # Создаем клавиатуру с кнопками одинакового размера
     builder = ReplyKeyboardBuilder()
@@ -474,14 +495,14 @@ async def send_payments_page(message: types.Message, state: FSMContext):
         navigation_buttons.append(KeyboardButton(text="⬅️ Назад"))
     if page < total_pages:
         navigation_buttons.append(KeyboardButton(text="▶️ Далее"))
-    
+
     # Добавляем навигационные кнопки в ряд
     if navigation_buttons:
         builder.row(*navigation_buttons)
-    
+
     # Добавляем кнопку выхода
     builder.row(KeyboardButton(text="⬅️ Выйти в главное меню"))
-    
+
     kb = builder.as_markup(resize_keyboard=True)
     await answer_editable(message, text.strip(), reply_markup=kb)
     await state.update_data(page=page)
@@ -533,6 +554,11 @@ async def convert_file(message: types.Message, state: FSMContext):
     data = await state.get_data()
     fmt = data.get("selected_format")
     file_obj = message.document or message.video or message.audio
+
+    if not file_obj:
+        await message.answer("❌ Файл не найден в сообщении.")
+        return
+
     if not fmt:
         await message.answer("⚠️ Сначала выберите формат.")
         return
@@ -552,9 +578,29 @@ async def convert_file(message: types.Message, state: FSMContext):
             return
 
     temp_dir = tempfile.gettempdir()
-    file_path = os.path.join(temp_dir, file_obj.file_name)
-    out_file = os.path.join(temp_dir, f"{os.path.splitext(file_obj.file_name)[0]}.{fmt.lower()}")
-    
+
+    # Проверяем наличие имени файла и создаем безопасное имя если нужно
+    if not hasattr(file_obj, 'file_name') or file_obj.file_name is None:
+        file_name = f"file_{user_id}_{int(time.time())}"
+    else:
+        file_name = file_obj.file_name
+
+    # Дополнительные проверки на None
+    if temp_dir is None:
+        await message.answer("❌ Ошибка: temp_dir равен None")
+        return
+    if file_name is None:
+        await message.answer("❌ Ошибка: file_name равен None")
+        return
+    if fmt is None:
+        await message.answer("❌ Ошибка: fmt равен None")
+        return
+
+    work_dir = tempfile.mkdtemp(prefix=f"converter_admin_{user_id}_")
+    file_name = os.path.basename(file_name)
+    file_path = os.path.join(work_dir, file_name)
+    out_file = os.path.join(work_dir, f"output.{fmt.lower()}")
+
     try:
         await message.answer("⏳ Скачиваю файл...")
 
@@ -572,152 +618,99 @@ async def convert_file(message: types.Message, state: FSMContext):
             await state.clear()
             return
         except Exception as e:
-            await message.answer(f"❌ Ошибка при скачивании файла: {traceback.format_exc()}")
+            await message.answer("❌ Не удалось скачать файл. Попробуйте отправить его ещё раз.")
             await state.clear()
             return
 
         await message.answer("⏳ Конвертирую файл, это может занять время...")
 
-        if fmt == "MP3":
-            if file_path.lower().endswith((".mp3", ".wav", ".ogg")):
-                await convert_audio_ffmpeg_async(file_path, out_file)
-            else:
-                clip = VideoFileClip(file_path)
-                clip.audio.write_audiofile(out_file, verbose=False, logger=None)
-                clip.close()
+        # Создаем прогресс-трекер для этой конвертации
+        track_id = await progress_tracker.start_conversion_progress(user_id, message, fmt)
 
-        elif fmt == "MP4":
-            # Используем ffmpeg компрессию с агрессивными, но разумными настройками по умолчанию
-            # Начинаем с CRF=28 и max_width=720 чтобы избежать резкого роста размера
-            compressed = None
+        # Создаем callback для обновления прогресса
+        from utiles.progress_tracker import ConversionProgressCallback
+        progress_callback = ConversionProgressCallback(user_id, progress_tracker)
+
+        # Используем единый конвертер для всех форматов (с мониторингом производительности, retry логикой и прогресс-баром)
+        try:
+            out_file = await file_converter.convert_file_with_retry(file_path, fmt, user_id=user_id, progress_callback=progress_callback)
+            await log_action(user_id, f"Конвертировал файл через converter_service: {fmt}")
+        except Exception as e:
+            await message.answer("❌ Основной конвертер не справился; пробую запасной способ.")
+            # Fallback к старому методу только в крайнем случае
             try:
-                await compress_video_ffmpeg_async(file_path, out_file, crf=30, max_width=640, audio_bitrate="64k", preset="fast")
-            except Exception:
-                # Если ffmpeg по какой-то причине недоступен, делаем fallback на moviepy,
-                # но ставим ограничения (низкий fps/качество) чтобы не вырастал размер.
-                try:
-                    clip = VideoFileClip(file_path)
-                    clip.write_videofile(out_file, codec="libx264", bitrate="600k", fps=24, audio=True, verbose=False, logger=None)
-                    clip.close()
-                except Exception:
-                    # Если и это провалилось — отдаём ошибку ниже
-                    pass
+                await message.answer("⚠️ Пробую альтернативный метод конвертации...")
 
-            # Если файл очень большой — пробуем итеративно сильнее сжимать
-            if os.path.exists(out_file) and os.path.getsize(out_file) > (100 * 1024 * 1024):
-                    await message.answer("⚠️ Файл слишком большой, пробую сильнее сжать...")
-                    for crf in (34, 38, 42):
-                        temp_comp = out_file + f".c{crf}.mp4"
-                        try:
-                            await compress_video_ffmpeg_async(file_path, temp_comp, crf=crf, max_width=640, audio_bitrate="64k", preset="slow")
-                            if os.path.getsize(temp_comp) <= (100 * 1024 * 1024):
-                                compressed = temp_comp
-                                break
-                            else:
-                                os.remove(temp_comp)
-                        except Exception:
-                            try:
-                                if os.path.exists(temp_comp):
-                                    os.remove(temp_comp)
-                            except Exception:
-                                pass
-                            continue
-
-                    if compressed:
-                        try:
-                            if os.path.exists(out_file):
-                                os.remove(out_file)
-                        except Exception:
-                            pass
-                        out_file = compressed
+                if fmt == "MP3":
+                    if file_path.lower().endswith((".mp3", ".wav", ".ogg")):
+                        await convert_audio_ffmpeg_async(file_path, out_file)
                     else:
-                        # Попробуем загрузить оригинал/сконвертированный файл на внешний хостинг и отправить ссылку
-                        try:
-                            upload_target = out_file if os.path.exists(out_file) else file_path
-                            link = await upload_file_fallback(upload_target)
-                            await message.answer(f"Файл слишком большой для отправки через Telegram, загрузил на временный хостинг: {link}")
-                        except Exception:
-                            await message.answer("❌ Невозможно сжать видео до допустимого размера и загрузить его. Попробуйте отправить меньший файл.")
-                        return
-
-        elif fmt == "GIF":
-            # Используем ffmpeg palettegen/paletteuse для компактного GIF
-            try:
-                await convert_video_to_gif_ffmpeg_async(file_path, out_file, width=480, fps=12)
-            except Exception:
-                # fallback: moviepy (медленнее и может дать большой файл)
-                clip = VideoFileClip(file_path)
-                clip.write_gif(out_file, fps=12)
-                clip.close()
-
-        elif fmt == "PNG → JPG" or fmt == "PNG → JPEG":
-            target_ext = "jpg" if fmt == "PNG → JPG" else "jpeg"
-            out_file = os.path.join(temp_dir, f"{os.path.splitext(file_obj.file_name)[0]}.{target_ext}")
-            try:
-                from PIL import Image
-                img = Image.open(file_path)
-                # Convert RGBA to RGB if needed
-                if img.mode in ("RGBA", "LA", "P"):
-                    rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-                    if img.mode == "RGBA":
-                        rgb_img.paste(img, mask=img.split()[-1])
+                        clip = VideoFileClip(file_path)
+                        clip.audio.write_audiofile(out_file, verbose=False, logger=None)
+                        clip.close()
+                elif fmt == "MP4":
+                    await compress_video_ffmpeg_async(file_path, out_file, crf=30, max_width=640, audio_bitrate="64k", preset="fast")
+                elif fmt == "GIF":
+                    await convert_video_to_gif_ffmpeg_async(file_path, out_file, width=480, fps=12)
+                elif fmt == "PNG → JPG" or fmt == "PNG → JPEG":
+                    target_ext = "jpg" if fmt == "PNG → JPG" else "jpeg"
+                    if temp_dir is None or file_name is None:
+                        raise ValueError(f"temp_dir={temp_dir}, file_name={file_name}")
+                    out_file = os.path.join(work_dir, f"output.{target_ext}")
+                    from PIL import Image
+                    img = Image.open(file_path)
+                    if img.mode in ("RGBA", "LA", "P"):
+                        rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                        if img.mode == "RGBA":
+                            rgb_img.paste(img, mask=img.split()[-1])
+                        else:
+                            rgb_img.paste(img)
+                        rgb_img.save(out_file, "JPEG", quality=90)
                     else:
-                        rgb_img.paste(img)
-                    rgb_img.save(out_file, "JPEG", quality=90)
+                        img.save(out_file, "JPEG", quality=90)
+                elif fmt == "PDF → PNG":
+                    if fitz is None:
+                        raise ImportError("PyMuPDF не установлен")
+                    doc = fitz.open(file_path)
+                    if len(doc) > 0:
+                        page = doc[0]
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                        out_file = os.path.join(work_dir, "output.png")
+                        pix.save(out_file)
+                    else:
+                        raise Exception("PDF файл пуст")
+                elif fmt == "PDF → ZIP":
+                    if fitz is None:
+                        raise ImportError("PyMuPDF не установлен")
+                    doc = fitz.open(file_path)
+                    out_file = os.path.join(work_dir, "output.zip")
+                    with zipfile.ZipFile(out_file, "w") as zipf:
+                        for i, page in enumerate(doc):
+                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                            img_name = f"page_{i + 1}.png"
+                            img_path = os.path.join(work_dir, img_name)
+                            pix.save(img_path)
+                            zipf.write(img_path, img_name)
+                            os.remove(img_path)
+                elif fmt == "TXT":
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    out_file = os.path.join(work_dir, "output.txt")
+                    with open(out_file, "w", encoding="utf-8") as f:
+                        f.write(content)
                 else:
-                    img.save(out_file, "JPEG", quality=90)
-            except Exception as e:
-                await message.answer(f"❌ Ошибка при конвертации PNG: {str(e)}")
-                return
+                    raise ValueError(f"Неподдерживаемый формат: {fmt}")
 
-        elif fmt == "PDF → PNG":
-            if fitz is None:
-                await message.answer("❌ Для работы с PDF установите PyMuPDF: `pip install PyMuPDF`")
-                return
+                await log_action(user_id, f"Конвертировал файл через fallback метод: {fmt}")
 
-            doc = fitz.open(file_path)
-            # Конвертируем первую страницу PDF в PNG
-            if len(doc) > 0:
-                page = doc[0]
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                out_file = os.path.join(temp_dir, f"{os.path.splitext(file_obj.file_name)[0]}.png")
-                pix.save(out_file)
-            else:
-                await message.answer("❌ PDF файл пуст.")
-                return
-
-        elif fmt == "PDF → ZIP":
-            if fitz is None:
-                await message.answer("❌ Для работы с PDF установите PyMuPDF: `pip install PyMuPDF`")
-                return
-
-            doc = fitz.open(file_path)
-            out_file = os.path.join(temp_dir, f"{os.path.splitext(file_obj.file_name)[0]}.zip")
-            with zipfile.ZipFile(out_file, "w") as zipf:
-                for i, page in enumerate(doc):
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                    img_name = f"page_{i + 1}.png"
-                    img_path = os.path.join(temp_dir, img_name)
-                    pix.save(img_path)
-                    zipf.write(img_path, img_name)
-                    os.remove(img_path)
-
-        elif fmt == "TXT":
-            # Простая конвертация: пытаемся прочитать файл как текст
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                out_file = os.path.join(temp_dir, f"{os.path.splitext(file_obj.file_name)[0]}.txt")
-                with open(out_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception as e:
-                await message.answer(f"❌ Ошибка при конвертации в TXT: {str(e)}")
+            except Exception as fallback_error:
+                await message.answer("❌ Не удалось конвертировать файл. Проверьте формат файла.")
                 return
 
         await message.answer_document(types.FSInputFile(out_file), caption=f"✅ Файл конвертирован в {fmt}")
 
     except Exception:
-        await message.answer(f"❌ Ошибка конвертации:\n<code>{traceback.format_exc()}</code>", parse_mode="HTML")
+        await message.answer("❌ Не удалось обработать файл. Проверьте формат файла и попробуйте снова.")
 
     finally:
         for path in (file_path, out_file):
@@ -726,6 +719,7 @@ async def convert_file(message: types.Message, state: FSMContext):
                     os.remove(path)
                 except OSError:
                     pass
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 @admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_file)
 @admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_format)
@@ -765,9 +759,9 @@ async def subscription_management_menu(message: types.Message, state: FSMContext
     if not await is_super_admin(user_id):
         await answer_editable(message, "❌ Только супер-админ может управлять подписками.")
         return
-    
+
     await log_action(user_id, "Открыл меню управления подписками")
-    
+
     kb_builder = ReplyKeyboardBuilder()
     kb_builder.row(
         KeyboardButton(text="📊 Все подписки"),
@@ -780,7 +774,7 @@ async def subscription_management_menu(message: types.Message, state: FSMContext
     kb_builder.row(
         KeyboardButton(text="⬅️ Назад в админку")
     )
-    
+
     kb = kb_builder.as_markup(resize_keyboard=True)
     await answer_editable(message, "💎 **Управление подписками**\n\nВыберите действие:", parse_mode="Markdown", reply_markup=kb)
 
@@ -791,15 +785,15 @@ async def view_all_subscriptions(message: types.Message, state: FSMContext):
     if not await is_super_admin(user_id):
         await answer_editable(message, "❌ Только супер-админ может просматривать подписки.")
         return
-    
+
     await log_action(user_id, "Просматривает все подписки")
-    
+
     try:
         subscriptions = await get_all_subscriptions(50)
         if not subscriptions:
             await answer_editable(message, "📭 Подписок пока нет.")
             return
-        
+
         text = "📊 **Все подписки:**\n\n"
         for sub in subscriptions:
             username = sub.get('username', 'Неизвестно')
@@ -807,11 +801,11 @@ async def view_all_subscriptions(message: types.Message, state: FSMContext):
             plan_type = sub.get('plan_type', 'free')
             is_active = sub.get('is_active', 0)
             status = "✅ Активна" if is_active else "❌ Неактивна"
-            
+
             text += f"👤 {first_name} (@{username})\n"
             text += f"📋 Тариф: {plan_type}\n"
             text += f"🔄 Статус: {status}\n\n"
-        
+
         # Возвращаемся в меню управления подписками
         kb_builder = ReplyKeyboardBuilder()
         kb_builder.row(
@@ -819,9 +813,9 @@ async def view_all_subscriptions(message: types.Message, state: FSMContext):
             KeyboardButton(text="⬅️ Назад в админку")
         )
         kb = kb_builder.as_markup(resize_keyboard=True)
-        
+
         await answer_editable(message, text, parse_mode="Markdown", reply_markup=kb)
-        
+
     except Exception as e:
         await answer_editable(message, f"❌ Ошибка при получении подписок: {str(e)}")
 
@@ -832,15 +826,15 @@ async def view_pending_payments(message: types.Message, state: FSMContext):
     if not await is_super_admin(user_id):
         await answer_editable(message, "❌ Только супер-админ может просматривать платежи.")
         return
-    
+
     await log_action(user_id, "Просматривает ожидающие платежи")
-    
+
     try:
         payments = await get_pending_payments(20)
         if not payments:
             await answer_editable(message, "📭 Ожидающих платежей нет.")
             return
-        
+
         text = "⏳ **Ожидающие платежи:**\n\n"
         for payment in payments:
             payment_id = payment.get('id')
@@ -849,13 +843,13 @@ async def view_pending_payments(message: types.Message, state: FSMContext):
             amount = payment.get('amount', 0)
             plan_duration = payment.get('plan_duration', '')
             created_at = payment.get('created_at', '')
-            
+
             text += f"🆔 ID: {payment_id}\n"
             text += f"👤 {first_name} (@{username})\n"
             text += f"💰 Сумма: {amount} ₽\n"
             text += f"📅 Период: {plan_duration}\n"
             text += f"🕒 Создан: {created_at}\n\n"
-        
+
         # Возвращаемся в меню управления подписками
         kb_builder = ReplyKeyboardBuilder()
         kb_builder.row(
@@ -863,9 +857,9 @@ async def view_pending_payments(message: types.Message, state: FSMContext):
             KeyboardButton(text="⬅️ Назад в админку")
         )
         kb = kb_builder.as_markup(resize_keyboard=True)
-        
+
         await answer_editable(message, text, parse_mode="Markdown", reply_markup=kb)
-        
+
     except Exception as e:
         await answer_editable(message, f"❌ Ошибка при получении платежей: {str(e)}")
 
@@ -876,8 +870,8 @@ async def activate_subscription_start(message: types.Message, state: FSMContext)
     if not await is_super_admin(user_id):
         await answer_editable(message, "❌ Только супер-админ может активировать подписки.")
         return
-    
-    await state.set_state(AdminStates.add_admin_wait_id)  # Переиспользуем состояние
+
+    await state.set_state(AdminStates.activate_premium_wait_id)
     await answer_editable(message, "Введите ID пользователя для активации премиум подписки:")
 
 @admin_router.message(F.text == "❌ Деактивировать подписку")
@@ -887,47 +881,45 @@ async def deactivate_subscription_start(message: types.Message, state: FSMContex
     if not await is_super_admin(user_id):
         await answer_editable(message, "❌ Только супер-админ может деактивировать подписки.")
         return
-    
-    await state.set_state(AdminStates.remove_admin_wait_id)  # Переиспользуем состояние
+
+    await state.set_state(AdminStates.deactivate_subscription_wait_id)
     await answer_editable(message, "Введите ID пользователя для деактивации подписки:")
 
-@admin_router.message(AdminStates.add_admin_wait_id, F.text)
 async def activate_subscription_confirm(message: types.Message, state: FSMContext):
     """Подтверждение активации подписки."""
     user_id = message.from_user.id
     try:
         target_user_id = int(message.text)
-        
+
         # Запрашиваем длительность подписки
-        await answer_editable(message, 
+        await answer_editable(message,
             f"Пользователь: {target_user_id}\n\n"
             "Выберите длительность подписки:\n"
             "1 - 1 месяц\n"
             "3 - 3 месяца\n"
             "12 - 1 год\n\n"
             "Введите номер (1, 3 или 12):")
-        
+
         # Сохраняем ID пользователя для следующего шага
         await state.update_data(target_user_id=target_user_id, action='activate')
-        
+
     except ValueError:
         await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(user_id)
         await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
 
-@admin_router.message(AdminStates.remove_admin_wait_id, F.text)
 async def deactivate_subscription_confirm(message: types.Message, state: FSMContext):
     """Подтверждение деактивации подписки."""
     user_id = message.from_user.id
     try:
         target_user_id = int(message.text)
-        
+
         # Сразу деактивируем подписку
         await deactivate_subscription(target_user_id)
         await log_action(user_id, f"Деактивировал подписку пользователя {target_user_id}")
         await answer_editable(message, f"✅ Подписка пользователя {target_user_id} деактивирована.")
-        
+
     except ValueError:
         await answer_editable(message, "❌ Неверный ID, введите числовой ID.")
     finally:
@@ -936,25 +928,77 @@ async def deactivate_subscription_confirm(message: types.Message, state: FSMCont
         await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
 
 # Обработчик для ввода длительности подписки
-@admin_router.message(F.text.in_(["1", "3", "12"]))
 async def subscription_duration_handler(message: types.Message, state: FSMContext):
     """Обработка выбора длительности подписки."""
     user_id = message.from_user.id
     data = await state.get_data()
-    
+
     if data.get('action') == 'activate' and 'target_user_id' in data:
         target_user_id = data['target_user_id']
         duration = int(message.text)
-        
+
         # Активируем подписку
         await activate_premium_subscription(target_user_id, duration, f"Активировано админом {user_id}")
         await log_action(user_id, f"Активировал премиум подписку для пользователя {target_user_id} на {duration} месяцев")
-        
+
         await answer_editable(message, f"✅ Премиум подписка активирована для пользователя {target_user_id} на {duration} месяцев.")
-        
+
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(user_id)
         await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+@admin_router.message(F.text == "📊 Статистика производительности")
+async def performance_stats_handler(message: types.Message, state: FSMContext):
+    """Показывает статистику производительности бота."""
+    user_id = message.from_user.id
+    if not await is_super_admin(user_id):
+        await answer_editable(message, "❌ Только супер-админ может просматривать статистику производительности.")
+        return
+
+    await log_action(user_id, "Просматривает статистику производительности")
+
+    try:
+        # Получаем статистику
+        stats = get_conversion_stats()
+        popular_formats = get_popular_formats(limit=5)
+
+        # Формируем текст статистики
+        stats_text = f"""📊 **Статистика производительности**
+
+🔢 **Общая статистика:**
+• Всего конвертаций: {stats['total_conversions']}
+• Неудачных конвертаций: {stats['failed_conversions']}
+• Среднее время: {stats['average_time']:.2f} сек
+• Процент успеха: {((stats['total_conversions'] - stats['failed_conversions']) / max(stats['total_conversions'], 1) * 100):.1f}%
+
+🏆 **Топ-5 популярных форматов:**"""
+
+        if popular_formats:
+            for i, (format_name, data) in enumerate(popular_formats, 1):
+                avg_time = data['total_time'] / data['count'] if data['count'] > 0 else 0
+                stats_text += f"\n{i}. **{format_name}**: {data['count']} раз (ср. {avg_time:.1f}с)"
+        else:
+            stats_text += "\n📭 Пока нет данных о конвертациях"
+
+        # Добавляем детализацию по форматам
+        if stats['formats_used']:
+            stats_text += "\n\n📋 **Детализация по форматам:**"
+            for format_name, data in sorted(stats['formats_used'].items(), key=lambda x: x[1]['count'], reverse=True):
+                avg_time = data['total_time'] / data['count'] if data['count'] > 0 else 0
+                stats_text += f"\n• {format_name}: {data['count']} конвертаций (ср. {avg_time:.1f}с)"
+
+        # Возвращаемся в главное меню админки
+        kb_builder = ReplyKeyboardBuilder()
+        kb_builder.row(
+            KeyboardButton(text="📊 Статистика производительности"),
+            KeyboardButton(text="⬅️ Назад в админку")
+        )
+        kb = kb_builder.as_markup(resize_keyboard=True)
+
+        await answer_editable(message, stats_text, parse_mode="Markdown", reply_markup=kb)
+
+    except Exception as e:
+        await answer_editable(message, f"❌ Ошибка при получении статистики: {str(e)}")
 
 @admin_router.message(F.text == "⬅️ Назад в админку")
 async def back_to_admin_menu(message: types.Message, state: FSMContext):

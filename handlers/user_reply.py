@@ -123,13 +123,3 @@ async def show_payments_handler(message: types.Message):
     # Разбиваем на сообщения по длине, если много записей
     text = "💳 История платежей:\n\n" + "\n".join(lines)
     await message.answer(text)
-
-@user_reply_router.message(Command("testpay"))
-async def testpay_cmd(message: types.Message):
-    # добавит тестовую запись в payments
-    try:
-        await db.add_payment(message.from_user.id, 1957000, "Списание", "Тестовый платёж")
-        await message.answer("✅ Тестовый платёж добавлен.")
-    except Exception as e:
-        await message.answer("❌ Ошибка при добавлении тестового платежа.")
-        print("add_payment error:", e)
