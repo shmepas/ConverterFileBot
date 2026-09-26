@@ -8,7 +8,6 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.dispatcher.event.bases import SkipHandler
 import asyncio
 import time
 from pathlib import Path
@@ -150,7 +149,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
     await answer_editable(
         message,
         "Привет! 👋 Я помогу конвертировать файлы.\n"
-        "Нажмите «🎞 Форматы», выберите результат и отправьте файл.\n"
+        "Нажмите «🎞 Форматы» и отправьте файл — бот покажет доступные результаты.\n"
         "Если возникнет проблема, создайте тикет — поддержка ответит здесь, в боте.\n"
         f"Ваша роль: {role}.",
         reply_markup=kb,
@@ -169,21 +168,25 @@ async def cancel_flow_cmd(message: types.Message, state: FSMContext):
 
 
 async def _show_main_menu(message: types.Message, state: FSMContext, text: str) -> None:
+    data = await state.get_data()
+    return_to_admin = bool(data.get("return_to_admin"))
     await _clear_user_flow(state)
     await state.set_state(MenuStates.main)
-    await answer_editable(
-        message, text,
-        reply_markup=await build_dynamic_keyboard(message.from_user.id),
-    )
+    if return_to_admin:
+        from handlers.adminka import admin_main_kb
+        keyboard = await admin_main_kb(message.from_user.id)
+    else:
+        keyboard = await build_dynamic_keyboard(message.from_user.id)
+    await answer_editable(message, text, reply_markup=keyboard)
 
 
 @user_privatka_router.message(Command("help"))
 async def help_cmd(message: types.Message):
     await message.answer(
         "🤖 <b>Как пользоваться ботом</b>\n\n"
-        "1. Нажмите «🎞 Форматы».\n"
-        "2. Выберите нужный результат.\n"
-        "3. Отправьте файл — бот проверит его и вернёт результат.\n\n"
+        "1. Нажмите «🎞 Форматы» и отправьте файл.\n"
+        "2. Выберите один из доступных результатов.\n"
+        "3. Получите готовый файл в чате.\n\n"
         "Для поддержки нажмите «🎫 Создать тикет»: ответ придёт сюда, "
         "без перехода к разработчику.\n\n"
         "/menu — выйти в главное меню\n"
@@ -213,7 +216,6 @@ async def reload_cmd(message: types.Message, state: FSMContext):
             'handlers.user_privatka',
             'handlers.adminka',
             'handlers.user_reply',
-            'handlers.formats',
             'converter_service',
             'utils',
             'data_base.db'
@@ -266,11 +268,7 @@ async def back_handler(message: types.Message, state: FSMContext):
 # ------------------------------
 @user_privatka_router.message(F.text == "📎 Отправить файл")
 async def send_file_handler(message: types.Message, state: FSMContext):
-    """Запрашивает у пользователя отправку файла для конвертации."""
-    user_id = message.from_user.id
-    await log_action(user_id, "Нажал кнопку '📎 Отправить файл'")
-    await state.set_state(MenuStates.waiting_file)
-    await answer_editable(message, "📎 Отправьте файл для конвертации:\n\n📋 Поддерживаемые форматы:\n• Аудио: MP3, WAV, OGG\n• Видео: MP4, MOV, GIF\n• Изображения: JPG, JPEG, PNG\n• Документы: PDF, TXT, DOCX, MD\n\n🔒 Максимальный размер: 20 МБ", reply_markup=reply.file_menu_kb())
+    await start_conversion_flow(message, state)
 
 # ------------------------------
 # Кнопка "О боте"
@@ -432,41 +430,35 @@ async def close_admin_panel_handler(message: types.Message, state: FSMContext):
     await answer_editable(message, "✅ Админская панель закрыта", reply_markup=kb)
 
 # ------------------------------
-# Выбор формата
+# Единый сценарий конвертации: сначала файл, затем доступные форматы
 # ------------------------------
-@user_privatka_router.message(F.text.lower() == "форматы")
-async def choose_format_handler(message: types.Message, state: FSMContext):
-    """Запускает процесс выбора формата конвертации."""
+@user_privatka_router.message(F.text.in_({"🎞 Форматы", "Форматы"}))
+async def start_conversion_flow(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    await log_action(user_id, "Нажал кнопку '🎞 Форматы'")
-
-    data = await state.get_data()
-    file_path = data.get("file_path")
-
-    if not file_path or not os.path.exists(file_path):
-        await answer_editable(message, "⚠️ Сначала отправьте файл для конвертации!", reply_markup=reply.file_menu_kb())
-        # Возвращаем в главное меню после показа предупреждения
-        await state.set_state(MenuStates.main)
-        kb = await build_dynamic_keyboard(user_id)
-        await answer_editable(message, "📋 Главное меню 👇", reply_markup=kb)
-        return
-
-    await state.set_state(MenuStates.waiting_format)
-    await answer_editable(message, "🎞 Выберите формат для конвертации:", reply_markup=reply.format_choice_kb())
+    await _clear_user_flow(state)
+    await log_action(user_id, "Открыл единый сценарий конвертации")
+    await state.update_data(return_to_admin=await is_admin(user_id) or await is_super_admin(user_id))
+    await state.set_state(MenuStates.waiting_file)
+    await answer_editable(
+        message,
+        "📎 Отправьте файл. Я проверю его и покажу только доступные форматы.\n"
+        "Можно вернуться в меню кнопкой «⬅️ Назад в меню» или командой /cancel.",
+        reply_markup=reply.file_menu_kb(),
+    )
 
 # ------------------------------
 # Получение файла
 # ------------------------------
-@user_privatka_router.message(F.document)
+@user_privatka_router.message(F.document | F.video | F.audio)
 async def handle_file(message: types.Message, state: FSMContext):
-    if await state.get_state() == "FormatStates:waiting_file":
-        # Let the admin conversion router consume files during its format flow.
-        raise SkipHandler
     user_id = message.from_user.id
-    await log_action(user_id, f"Отправил файл: {message.document.file_name}")
-
-    file = message.document
-    file_name = file.file_name or f"{file.file_unique_id}.bin"
+    file = message.document or message.video or message.audio
+    if not file:
+        return
+    file_name = getattr(file, "file_name", None)
+    if not file_name:
+        file_name = f"upload_{file.file_unique_id}.bin"
+    await log_action(user_id, f"Отправил файл для конвертации: {file_name}")
 
     # Валидация имени файла
     if not file_validator.validate_filename(file_name):
@@ -474,6 +466,10 @@ async def handle_file(message: types.Message, state: FSMContext):
         return
 
     # Безопасное именование файла
+    current_data = await state.get_data()
+    _remove_pending_upload(current_data.get("file_path"))
+    await state.update_data(file_path=None, source_name=None, source_type=None, available_formats=[])
+    await state.set_state(MenuStates.waiting_file)
     safe_file_name = file_validator.get_safe_filename(file_name, user_id)
     timestamp = int(time.time())
     file_path = os.path.join("downloads", f"{user_id}_{timestamp}_{uuid.uuid4().hex}_{safe_file_name}")
@@ -615,15 +611,23 @@ async def user_format_selected(message: types.Message, state: FSMContext):
         await process_conversion(
             message, state, user_id, file_path, source_name,
             source_type, message.text,
+            charge_quota=not (await is_admin(user_id) or await is_super_admin(user_id)),
         )
     except ConversionRejected as exc:
         await answer_editable(message, str(exc))
     finally:
         file_converter.cleanup_files(file_path)
+        return_to_admin = bool((await state.get_data()).get("return_to_admin"))
+        await state.clear()
         await state.set_state(MenuStates.main)
+        if return_to_admin:
+            from handlers.adminka import admin_main_kb
+            keyboard = await admin_main_kb(user_id)
+        else:
+            keyboard = await build_dynamic_keyboard(user_id)
         await answer_editable(
             message, "↩️ Возвращаю в главное меню",
-            reply_markup=await build_dynamic_keyboard(user_id),
+            reply_markup=keyboard,
         )
 
 # Удален дублирующий обработчик - теперь используется универсальный back_handler

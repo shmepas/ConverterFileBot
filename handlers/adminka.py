@@ -1,5 +1,4 @@
 import os
-import tempfile
 import logging
 import shutil
 from datetime import datetime, timedelta
@@ -72,10 +71,6 @@ class AdminStates(StatesGroup):
     subscription_management = State()
     activate_premium_wait_id = State()
     deactivate_subscription_wait_id = State()
-
-class FormatStates(StatesGroup):
-    waiting_format = State()
-    waiting_file = State()
 
 # ------------------------------
 # Главная клавиатура админа
@@ -205,19 +200,6 @@ async def _build_bot_health_report() -> str:
         f"Активные диалоги: {fsm_sessions} · свободно на диске: {disk_text}\n"
         f"Последний бэкап: {backup_text}\n"
         f"Последняя ошибка: {last_error_text}"
-    )
-
-# ------------------------------
-# Клавиатура выбора формата
-# ------------------------------
-def formats_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="MP3"), KeyboardButton(text="MP4"), KeyboardButton(text="GIF")],
-            [KeyboardButton(text="TXT"), KeyboardButton(text="PDF → PNG"), KeyboardButton(text="PDF → ZIP")],
-            [KeyboardButton(text="PNG → JPG"), KeyboardButton(text="PNG → JPEG"), KeyboardButton(text="⬅️ Назад")]
-        ],
-        resize_keyboard=True
     )
 
 # ------------------------------
@@ -628,106 +610,6 @@ async def payments_navigation(message: types.Message, state: FSMContext):
         await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
     else:
         await answer_editable(message, "❌ Неизвестная команда. Используйте кнопки ниже.", reply_markup=ReplyKeyboardRemove())
-
-# ------------------------------
-# Работа с форматами
-# ------------------------------
-@admin_router.message(F.text == "🎞 Форматы")
-async def choose_format(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    await log_action(user_id, "Нажал кнопку '🎞 Форматы'")
-    await state.set_state(FormatStates.waiting_format)
-    await answer_editable(message, "Выберите формат для конвертации 👇", reply_markup=formats_kb())
-
-@admin_router.message(FormatStates.waiting_format, F.text.in_({"MP3", "MP4", "GIF", "TXT", "PDF → PNG", "PDF → ZIP", "PNG → JPG", "PNG → JPEG"}))
-async def format_selected(message: types.Message, state: FSMContext):
-    await state.update_data(selected_format=message.text)
-    await state.set_state(FormatStates.waiting_file)
-    await answer_editable(
-        message,
-        f"📁 Отправьте файл для конвертации в {message.text} формат.\n\n"
-        "Когда закончите — нажмите ⬅️ Назад.",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="⬅️ Назад")]],
-            resize_keyboard=True
-        )
-    )
-
-@admin_router.message(FormatStates.waiting_file, F.content_type.in_({"document", "video", "audio"}))
-async def convert_file(message: types.Message, state: FSMContext):
-    """Validate and process admin conversions through the same bounded worker."""
-    from utiles.conversion_workflow import ConversionRejected, process_conversion
-    from utiles.file_validator import file_validator
-
-    data = await state.get_data()
-    target_format = data.get("selected_format")
-    file_obj = message.document or message.video or message.audio
-    user_id = message.from_user.id
-    if not file_obj or not target_format:
-        await message.answer("⚠️ Сначала выберите формат и отправьте файл.")
-        await state.clear()
-        return
-
-    from data_base.db import check_user_limits
-
-    limits = await check_user_limits(user_id)
-    file_size = getattr(file_obj, "file_size", 0) or 0
-    if file_size > limits["max_file_size"]:
-        await message.answer(
-            f"🚫 Файл превышает лимит вашего тарифа ({limits['max_file_size'] // (1024 * 1024)} МБ)."
-        )
-        await state.clear()
-        return
-
-    work_dir = tempfile.mkdtemp(prefix="converter_admin_")
-    raw_name = getattr(file_obj, "file_name", None) or f"upload_{file_obj.file_unique_id}.bin"
-    safe_name = file_validator.get_safe_filename(raw_name, user_id)
-    file_path = os.path.join(work_dir, safe_name)
-    try:
-        file_info = await message.bot.get_file(file_obj.file_id)
-        if file_info.file_size and file_info.file_size > limits["max_file_size"]:
-            raise ValueError("Файл превышает лимит тарифа")
-        await message.bot.download_file(file_info.file_path, destination=file_path, timeout=300)
-        source_type = file_validator.detect_file_type(file_path)
-        if target_format not in file_validator.TARGET_FORMATS_BY_INPUT_TYPE.get(source_type, []):
-            raise ValueError("Содержимое файла не подходит для выбранного формата")
-        canonical_path = os.path.splitext(file_path)[0] + file_validator.canonical_extension(file_path, source_type)
-        if canonical_path != file_path:
-            os.replace(file_path, canonical_path)
-            file_path = canonical_path
-
-        await process_conversion(
-            message, state, user_id, file_path, raw_name, source_type,
-            target_format, charge_quota=False,
-        )
-    except ConversionRejected as exc:
-        await message.answer(str(exc))
-    except Exception:
-        await message.answer("❌ Не удалось скачать или проверить файл. Проверьте формат и размер.")
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        await state.set_state(AdminStates.main)
-        await answer_editable(
-            message, "Возврат в главное меню админки 👇",
-            reply_markup=await admin_main_kb(user_id),
-        )
-
-@admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_file)
-@admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_format)
-async def back_from_formats(message: types.Message, state: FSMContext):
-    await state.clear()
-    user_id = message.from_user.id
-
-    # 🔍 Проверяем, админ ли пользователь
-    if await is_admin(user_id) or await is_super_admin(user_id):
-        kb = await admin_main_kb(user_id)
-        text = "↩️ Возврат в главное меню админки."
-    else:
-        # 💡 Обычному пользователю — его клавиатура
-        kb = main_menu_kb()
-        text = "↩️ Возврат в главное меню."
-
-    await message.answer(text, reply_markup=kb)
 
 # ------------------------------
 # 💉 FIX: Закрытие админки (исправлено)

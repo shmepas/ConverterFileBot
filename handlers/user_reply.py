@@ -6,7 +6,7 @@ from utils import answer_editable
 from data_base import db
 from data_base.db import get_user_payments
 from aiogram.fsm.context import FSMContext
-from handlers.user_privatka import MenuStates, build_dynamic_keyboard
+from handlers.user_privatka import MenuStates, build_dynamic_keyboard, start_conversion_flow
 from aiogram.filters import Command
 
 user_reply_router = Router()
@@ -23,19 +23,7 @@ async def show_menu(message: types.Message, state: FSMContext):
 # === Отправить файл ===
 @user_reply_router.message(F.text == "Отправить файл")
 async def send_file_prompt(message: types.Message, state: FSMContext):
-    await state.set_state(MenuStates.waiting_file)
-    await message.answer("📂 Пришлите файл для конвертации.")
-
-# === Выбор формата ===
-@user_reply_router.message(F.text == "🎞 Форматы")
-async def choose_format(message: types.Message, state: FSMContext):
-    await state.set_state(MenuStates.waiting_format)
-    await db.log_action(message.from_user.id, "Открыл выбор формата")
-    await answer_editable(
-        message,
-        "🎞 Выберите нужный формат конвертации:",
-        reply_markup=reply.format_choice_kb()
-    )
+    await start_conversion_flow(message, state)
 
 # === Вариант оплаты ===
 @user_reply_router.message(F.text.in_(["Вариант оплаты", "💳 Вариант оплаты"]))
@@ -73,19 +61,6 @@ async def about_bot(message: types.Message, state: FSMContext):
 
 🔒 Максимальный размер файла: 20 МБ"""
     )
-
-# === Конвертация форматов через ReplyKeyboard ===
-@user_reply_router.message(F.text.in_(["MP4 ➜ MP3", "MP4 ➜ MOV", "MP4 ➜ GIF"]))
-async def format_selected(message: types.Message, state: FSMContext):
-    format_map = {
-        "MP4 ➜ MP3": "mp3",
-        "MP4 ➜ MOV": "mov",
-        "MP4 ➜ GIF": "gif",
-    }
-    chosen = format_map.get(message.text)
-    await db.log_action(message.from_user.id, f"Выбрал формат: {chosen}")
-    await state.set_state(MenuStates.waiting_file)
-    await answer_editable(message, f"✅ Формат {chosen.upper()} выбран.\nТеперь отправь видео для конвертации!")
 
 # === Кнопка Назад (скрывает inline и возвращает ReplyKeyboard) ===
 @user_reply_router.message(F.text == "⬅️ Назад")

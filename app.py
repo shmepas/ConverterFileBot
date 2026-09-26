@@ -17,7 +17,6 @@ from handlers.user_privatka import user_privatka_router
 from handlers.adminka import admin_router
 from handlers.user_reply import user_reply_router
 from middlewares.logging_middleware import LoggingMiddleware
-from handlers.formats import formats_router
 from handlers.logs_router import logs_router
 from handlers.tickets import ticket_router
 from handlers.conversions import conversion_router
@@ -55,7 +54,6 @@ dp.include_router(ticket_router)
 dp.include_router(conversion_router)
 dp.include_router(user_privatka_router)
 dp.include_router(admin_router)
-dp.include_router(formats_router)
 dp.include_router(user_reply_router)
 dp.include_router(logs_router)
 dp.include_router(fallback_router)
