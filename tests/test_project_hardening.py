@@ -96,6 +96,90 @@ class ProjectHardeningTests(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = self.old_db_path
         self.temp_dir.cleanup()
 
+    async def test_ticket_menu_command_cancels_draft_instead_of_creating_ticket(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from handlers import tickets
+        from handlers.user_privatka import MenuStates
+
+        storage = SQLiteFSMStorage()
+        state = FSMContext(
+            storage=storage,
+            key=StorageKey(bot_id=77, chat_id=1001, user_id=1001),
+        )
+        await state.set_state(tickets.TicketStates.waiting_message)
+        await state.update_data(draft="draft text")
+        person = SimpleNamespace(
+            id=1001, username="tester", first_name="Test",
+            last_name="User", full_name="Test User",
+        )
+        message = _FakeTicketMessage(person, "/menu", _FakeTicketBot())
+
+        with patch("handlers.tickets.answer_editable", new=AsyncMock()) as answer:
+            with patch(
+                "handlers.user_privatka.build_dynamic_keyboard",
+                new=AsyncMock(return_value="main-menu"),
+            ):
+                await tickets.receive_ticket(message, state)
+
+        self.assertEqual(await state.get_state(), MenuStates.main.state)
+        self.assertEqual(await state.get_data(), {})
+        self.assertEqual(await db.get_support_tickets(user_id=1001), [])
+        self.assertIn("отменён", answer.await_args.args[1])
+
+    async def test_unmatched_private_text_gets_menu_and_help_hint(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from handlers import fallback
+        from handlers.user_privatka import MenuStates
+
+        state = FSMContext(
+            storage=SQLiteFSMStorage(),
+            key=StorageKey(bot_id=77, chat_id=1001, user_id=1001),
+        )
+        await state.set_state(MenuStates.main)
+        message = SimpleNamespace(
+            chat=SimpleNamespace(type="private"),
+            from_user=SimpleNamespace(id=1001),
+            text="неизвестный текст",
+            answer=AsyncMock(),
+        )
+        with patch(
+            "handlers.user_privatka.build_dynamic_keyboard",
+            new=AsyncMock(return_value="main-menu"),
+        ):
+            await fallback.unmatched_private_message(message, state)
+
+        self.assertIn("/help", message.answer.await_args.args[0])
+        self.assertEqual(message.answer.await_args.kwargs["reply_markup"], "main-menu")
+
+    async def test_setup_commands_registers_recovery_commands_and_menu_button(self):
+        import importlib
+        from unittest.mock import AsyncMock
+
+        with patch.dict(os.environ, {"TOKEN": "123456:TEST", "SUPER_ADMIN_ID": "1001"}):
+            app = importlib.import_module("app")
+        with patch.object(app.bot, "set_my_commands", new=AsyncMock()) as set_commands:
+            with patch.object(app.bot, "set_chat_menu_button", new=AsyncMock()) as set_menu:
+                await app.setup_commands()
+
+        command_names = [command.command for command in set_commands.await_args.kwargs["commands"]]
+        self.assertEqual(command_names, ["start", "menu", "help", "cancel"])
+        self.assertIsInstance(
+            set_commands.await_args.kwargs["scope"],
+            app.types.BotCommandScopeAllPrivateChats,
+        )
+        self.assertIsInstance(
+            set_menu.await_args.kwargs["menu_button"],
+            app.types.MenuButtonCommands,
+        )
+
     async def test_ticket_conversation_owner_and_atomic_creation_limits(self):
         ticket_id = await db.create_support_ticket(1001, "Первое сообщение")
         self.assertFalse(await db.user_reply_to_support_ticket(ticket_id, 1002, "Чужой ответ"))

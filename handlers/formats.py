@@ -7,7 +7,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, FSInputFile
 
 from utils import answer_editable
-from kbds.reply import format_choice_kb, main_menu_kb
+from kbds.reply import format_choice_kb
 from converter_service import file_converter
 from data_base import db
 
@@ -34,6 +34,9 @@ def formats_kb() -> ReplyKeyboardMarkup:
 @formats_router.message(F.text == "🎞 Форматы")
 async def choose_format(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    from handlers.user_privatka import _clear_user_flow
+
+    await _clear_user_flow(state)
     await state.set_state(FormatStates.waiting_format)
     await answer_editable(message, "🎞 Выберите формат для конвертации 👇", reply_markup=formats_kb())
 
@@ -115,5 +118,11 @@ async def convert_file(message: types.Message, state: FSMContext):
 # --- Кнопка "Назад" ---
 @formats_router.message(F.text == "⬅️ Назад в меню")
 async def back_to_menu(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("↩️ Возврат в главное меню.", reply_markup=main_menu_kb())
+    from handlers.user_privatka import MenuStates, _clear_user_flow, build_dynamic_keyboard
+
+    await _clear_user_flow(state)
+    await state.set_state(MenuStates.main)
+    await message.answer(
+        "↩️ Возврат в главное меню.",
+        reply_markup=await build_dynamic_keyboard(message.from_user.id),
+    )

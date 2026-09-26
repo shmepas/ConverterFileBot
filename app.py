@@ -21,6 +21,7 @@ from handlers.formats import formats_router
 from handlers.logs_router import logs_router
 from handlers.tickets import ticket_router
 from handlers.conversions import conversion_router
+from handlers.fallback import fallback_router
 from utiles.conversion_history import cleanup_expired_files
 import logging
 
@@ -57,6 +58,7 @@ dp.include_router(admin_router)
 dp.include_router(formats_router)
 dp.include_router(user_reply_router)
 dp.include_router(logs_router)
+dp.include_router(fallback_router)
 
 # --------------------------
 # Настройка базы и супер-админа
@@ -91,9 +93,17 @@ async def backup_loop():
 # Настройка команд бота
 # --------------------------
 async def setup_commands():
-    # Убираем все команды из меню слева
-    await bot.set_my_commands(commands=[], scope=None)
-    await bot.set_my_commands(commands=[], scope=types.BotCommandScopeAllPrivateChats())
+    commands = [
+        types.BotCommand(command="start", description="Открыть главное меню"),
+        types.BotCommand(command="menu", description="Выйти в главное меню"),
+        types.BotCommand(command="help", description="Как пользоваться ботом"),
+        types.BotCommand(command="cancel", description="Отменить текущий ввод"),
+    ]
+    await bot.set_my_commands(
+        commands=commands,
+        scope=types.BotCommandScopeAllPrivateChats(),
+    )
+    await bot.set_chat_menu_button(menu_button=types.MenuButtonCommands())
 
 # --------------------------
 # Корректная остановка бота

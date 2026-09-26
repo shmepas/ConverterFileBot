@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
 import asyncio
 import time
+from pathlib import Path
 from html import escape
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import FSInputFile
@@ -101,13 +102,40 @@ async def build_dynamic_keyboard(user_id: int, admin_open: bool = False) -> type
 
 # Универсальная смена состояния удалена - больше не используется
 
+def _remove_pending_upload(file_path: str | None) -> None:
+    if not file_path:
+        return
+    downloads_root = Path("downloads")
+    if downloads_root.is_symlink():
+        return
+    downloads_root = downloads_root.resolve()
+    candidate = Path(file_path)
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    try:
+        if candidate.is_symlink():
+            return
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(downloads_root)
+        if resolved.is_file():
+            resolved.unlink()
+    except (OSError, ValueError):
+        return
+
+
+async def _clear_user_flow(state: FSMContext) -> None:
+    data = await state.get_data()
+    _remove_pending_upload(data.get("file_path"))
+    await state.clear()
+
+
 # ------------------------------
 # /start
 # ------------------------------
 @user_privatka_router.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    await state.clear()
+    await _clear_user_flow(state)
     await state.set_state(MenuStates.main)
     await add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
@@ -119,19 +147,48 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
     await log_action(user_id, f"Команда /start ({role})")
     kb = await build_dynamic_keyboard(user_id)
-    await message.answer(f"Привет! 👋 Я конвертирую файлы в нужный формат.\nВаша роль: {role}",
-                         reply_markup=types.ReplyKeyboardRemove())
-    await answer_editable(message, "Главное меню 👇", reply_markup=kb)
-
+    await answer_editable(
+        message,
+        "Привет! 👋 Я помогу конвертировать файлы.\n"
+        "Нажмите «🎞 Форматы», выберите результат и отправьте файл.\n"
+        "Если возникнет проблема, создайте тикет — поддержка ответит здесь, в боте.\n"
+        f"Ваша роль: {role}.",
+        reply_markup=kb,
+    )
 # ------------------------------
 # /menu
 # ------------------------------
 @user_privatka_router.message(Command("menu"))
 async def menu_cmd(message: types.Message, state: FSMContext):
-    await state.set_state(MenuStates.main)
-    kb = await build_dynamic_keyboard(message.from_user.id)
-    await answer_editable(message, "Главное меню 👇", reply_markup=kb)
+    await _show_main_menu(message, state, "↩️ Главное меню 👇")
 
+
+@user_privatka_router.message(Command("cancel"))
+async def cancel_flow_cmd(message: types.Message, state: FSMContext):
+    await _show_main_menu(message, state, "Текущий шаг отменён. Главное меню 👇")
+
+
+async def _show_main_menu(message: types.Message, state: FSMContext, text: str) -> None:
+    await _clear_user_flow(state)
+    await state.set_state(MenuStates.main)
+    await answer_editable(
+        message, text,
+        reply_markup=await build_dynamic_keyboard(message.from_user.id),
+    )
+
+
+@user_privatka_router.message(Command("help"))
+async def help_cmd(message: types.Message):
+    await message.answer(
+        "🤖 <b>Как пользоваться ботом</b>\n\n"
+        "1. Нажмите «🎞 Форматы».\n"
+        "2. Выберите нужный результат.\n"
+        "3. Отправьте файл — бот проверит его и вернёт результат.\n\n"
+        "Для поддержки нажмите «🎫 Создать тикет»: ответ придёт сюда, "
+        "без перехода к разработчику.\n\n"
+        "/menu — выйти в главное меню\n"
+        "/cancel — отменить текущий ввод"
+    )
 # ------------------------------
 # /reload - Перезагрузка кода (только для супер-админа)
 # ------------------------------
@@ -196,28 +253,13 @@ async def reload_cmd(message: types.Message, state: FSMContext):
 # ------------------------------
 # Универсальная кнопка "Назад"
 # ------------------------------
-@user_privatka_router.message(F.text.in_(["⬅️ Назад в меню", "назад"]))
+@user_privatka_router.message(F.text.in_([
+    "⬅️ Назад в меню", "📋 Меню", "Меню", "назад",
+]))
 async def back_handler(message: types.Message, state: FSMContext):
-    """Универсальный обработчик кнопки 'Назад' для всех состояний."""
-    user_id = message.from_user.id
-    await log_action(user_id, f"Нажал кнопку 'Назад' ({message.text})")
-
-    data = await state.get_data()
-    file_path = data.get("file_path")
-
-    # Очищаем временный файл если он есть
-    if file_path and os.path.exists(file_path):
-        try:
-            os.remove(file_path)
-        except OSError:
-            pass
-
-    # Очищаем state
-    await state.clear()
-
-    # Возвращаемся в главное меню
-    kb = await build_dynamic_keyboard(user_id)
-    await answer_editable(message, "↩️ Возврат в главное меню", reply_markup=kb)
+    """Return to the main menu and discard any unconverted temporary upload."""
+    await log_action(message.from_user.id, f"Вернулся в меню ({message.text})")
+    await _show_main_menu(message, state, "↩️ Возврат в главное меню 👇")
 
 # ------------------------------
 # Отправка файла
@@ -238,7 +280,8 @@ async def about_bot_handler(message: types.Message, state: FSMContext):
     """Показывает информацию о боте."""
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку 'О боте'")
-    await state.set_state(MenuStates.main)  # Возвращаемся в главное меню
+    await _clear_user_flow(state)
+    await state.set_state(MenuStates.main)
     kb = await build_dynamic_keyboard(user_id)
 
     about_text = """ℹ️ **О боте**
@@ -263,7 +306,7 @@ async def about_bot_handler(message: types.Message, state: FSMContext):
 3. Получите конвертированный файл
 
 🔒 Максимальный размер файла: 20 МБ
-📧 Поддержка: через команду /support"""
+🆘 Для помощи нажмите «🎫 Создать тикет» или напишите /help"""
 
     await answer_editable(message, about_text, parse_mode="Markdown", reply_markup=kb)
 
@@ -275,6 +318,7 @@ async def menu_handler(message: types.Message, state: FSMContext):
     """Показывает главное меню."""
     user_id = message.from_user.id
     await log_action(user_id, "Нажал кнопку 'Меню'")
+    await _clear_user_flow(state)
     await state.set_state(MenuStates.main)
     kb = await build_dynamic_keyboard(user_id)
     await answer_editable(message, "📋 Главное меню 👇", reply_markup=kb)

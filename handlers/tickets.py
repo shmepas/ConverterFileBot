@@ -3,6 +3,7 @@ from html import escape
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from data_base import db
@@ -97,9 +98,58 @@ async def _admin_keyboard(user_id: int):
     return await admin_main_kb(user_id)
 
 
+async def _handle_ticket_navigation(
+    message: types.Message, state: FSMContext, *, admin: bool = False
+) -> bool:
+    text = (message.text or "").strip()
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+    if command == "/help":
+        raise SkipHandler
+    if command == "/start":
+        await state.clear()
+        raise SkipHandler
+    if command.startswith("/") and command not in {"/menu", "/cancel"}:
+        raise SkipHandler
+    navigation_labels = {
+        "📋 Меню", "Меню", "⬅️ Назад в меню", "🎞 Форматы",
+        "📎 Отправить файл", "ℹ️ О боте", "О боте",
+        "💰 Вариант оплаты", "💳 Вариант оплаты", "💳 Платежи",
+        "📨 Мои тикеты", "🎫 Создать тикет", "🆘 Связь с разработчиком",
+        "👤 Моя роль", "Моя роль", "🔧 Админка", "Админка",
+        "⬅️ Закрыть админку", "📜 Просмотр логов",
+        "💎 Управление подписками", "💎 Просмотр подписок",
+        "➕ Добавить админа", "➖ Удалить админа", "🧾 Все платежи",
+        "📊 Статистика производительности", "🩺 Состояние бота",
+    }
+    is_navigation = text in navigation_labels or text.startswith("🎫 Тикеты")
+    if command not in {"/menu", "/cancel"} and not is_navigation:
+        return False
+
+    if command in {"/menu", "/cancel"} or text in {
+        "📋 Меню", "Меню", "⬅️ Назад в меню",
+    }:
+        await state.clear()
+        if admin:
+            reply_markup = await _admin_keyboard(message.from_user.id)
+            response = "Текущий ответ отменён. Вы вернулись в админ-панель."
+        else:
+            from handlers.user_privatka import MenuStates, build_dynamic_keyboard
+
+            await state.set_state(MenuStates.main)
+            reply_markup = await build_dynamic_keyboard(message.from_user.id)
+            response = "Создание или ответ на тикет отменён. Главное меню 👇"
+        await answer_editable(message, response, reply_markup=reply_markup)
+        return True
+
+    await state.clear()
+    raise SkipHandler
+
+
 @ticket_router.message(F.text == "🎫 Создать тикет")
 async def start_ticket(message: types.Message, state: FSMContext):
-    await state.clear()
+    from handlers.user_privatka import _clear_user_flow
+
+    await _clear_user_flow(state)
     await state.set_state(TicketStates.waiting_message)
     cancel_kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отменить тикет")]], resize_keyboard=True
@@ -114,6 +164,8 @@ async def start_ticket(message: types.Message, state: FSMContext):
 
 @ticket_router.message(TicketStates.waiting_message)
 async def receive_ticket(message: types.Message, state: FSMContext):
+    if await _handle_ticket_navigation(message, state, admin=False):
+        return
     user_id = message.from_user.id
     if message.text == "❌ Отменить тикет":
         await state.clear()
@@ -467,6 +519,8 @@ async def admin_ticket_action(callback: types.CallbackQuery, state: FSMContext):
 
 @ticket_router.message(TicketStates.waiting_user_reply)
 async def receive_user_ticket_reply(message: types.Message, state: FSMContext):
+    if await _handle_ticket_navigation(message, state, admin=False):
+        return
     user_id = message.from_user.id
     reply_text, attachment, attachment_error = _ticket_payload(message)
     if attachment_error:
@@ -505,6 +559,8 @@ async def receive_user_ticket_reply(message: types.Message, state: FSMContext):
 
 @ticket_router.message(TicketStates.waiting_admin_reply)
 async def receive_admin_reply(message: types.Message, state: FSMContext):
+    if await _handle_ticket_navigation(message, state, admin=True):
+        return
     admin_id = message.from_user.id
     if not await db.has_admin_access(admin_id):
         await state.clear()
