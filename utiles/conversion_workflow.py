@@ -1,5 +1,6 @@
 """Shared quota, isolated conversion, history, upload, and cancellation workflow."""
 import asyncio
+import logging
 import os
 import time
 
@@ -14,6 +15,9 @@ from utiles.conversion_runner import (
     conversion_runner,
 )
 from utiles.file_validator import file_validator
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConversionRejected(Exception):
@@ -119,6 +123,7 @@ async def process_conversion(
             await db.decrement_conversion_count(user_id)
         raise ConversionRejected("Подождите несколько секунд перед следующей конвертацией.")
     except ConversionTimedOut:
+        logger.warning("Conversion timed out for user_id=%s format=%s", user_id, target_format)
         if history_id is None:
             history_id = await db.create_conversion_history(
                 user_id, source_name, target_format, retained_file_id
@@ -140,6 +145,7 @@ async def process_conversion(
             await db.decrement_conversion_count(user_id)
         raise
     except Exception as exc:
+        logger.exception("Conversion failed for user_id=%s format=%s", user_id, target_format)
         if history_id is None:
             history_id = await db.create_conversion_history(
                 user_id, source_name, target_format, retained_file_id

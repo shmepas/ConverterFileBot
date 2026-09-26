@@ -1,6 +1,7 @@
 """Run untrusted media conversions in killable, resource-bounded child processes."""
 import asyncio
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -15,6 +16,7 @@ from data_base import db
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+logger = logging.getLogger(__name__)
 
 
 def _read_int_setting(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -46,9 +48,18 @@ class ConversionTimedOut(Exception):
 class ConversionRunner:
     def __init__(self, max_concurrent: int = MAX_CONCURRENT_CONVERSIONS,
                  timeout_seconds: int = CONVERSION_TIMEOUT_SECONDS):
-        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.max_concurrent = max(1, int(max_concurrent))
+        self.semaphore = asyncio.Semaphore(self.max_concurrent)
         self.timeout_seconds = timeout_seconds
         self.active: dict[int, tuple[str, asyncio.Task, Message | None]] = {}
+
+    @property
+    def running_count(self) -> int:
+        return self.max_concurrent - self.semaphore._value
+
+    @property
+    def queued_count(self) -> int:
+        return max(0, len(self.active) - self.running_count)
 
     async def _edit_progress(self, message: Message, text: str, job_id: str) -> None:
         markup = InlineKeyboardMarkup(inline_keyboard=[[
@@ -81,6 +92,7 @@ class ConversionRunner:
                 await self._edit_progress(progress_message, f"⚙️ Конвертирую файл в {target_format}…", job_id)
                 with tempfile.TemporaryDirectory(prefix="converter_worker_") as temp_dir:
                     result_path = Path(temp_dir) / "result.json"
+                    worker_log_path = Path(temp_dir) / "worker.log"
                     command = [
                         sys.executable, "-B", "-m", "utiles.conversion_worker",
                         str(Path(input_path).resolve()), target_format,
@@ -109,28 +121,36 @@ class ConversionRunner:
                         "PYTHONUTF8": "1",
                     })
 
-                    process = await asyncio.create_subprocess_exec(
-                        *command,
-                        cwd=str(PROJECT_ROOT),
-                        stdin=asyncio.subprocess.DEVNULL,
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                        env=worker_env,
-                        **creation_options,
-                    )
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
-                    except asyncio.TimeoutError as exc:
-                        await self._terminate_process_tree(process)
-                        raise ConversionTimedOut from exc
-                    except asyncio.CancelledError:
-                        await self._terminate_process_tree(process)
-                        raise
+                    with worker_log_path.open("wb") as worker_output:
+                        process = await asyncio.create_subprocess_exec(
+                            *command,
+                            cwd=str(PROJECT_ROOT),
+                            stdin=asyncio.subprocess.DEVNULL,
+                            stdout=worker_output,
+                            stderr=asyncio.subprocess.STDOUT,
+                            env=worker_env,
+                            **creation_options,
+                        )
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
+                        except asyncio.TimeoutError as exc:
+                            await self._terminate_process_tree(process)
+                            logger.warning("Conversion worker exceeded timeout=%s seconds", self.timeout_seconds)
+                            raise ConversionTimedOut from exc
+                        except asyncio.CancelledError:
+                            await self._terminate_process_tree(process)
+                            raise
+
+                    worker_output_tail = self._read_worker_output(worker_log_path)
 
                     if not result_path.is_file():
+                        if worker_output_tail:
+                            logger.error("Conversion worker produced no result: %s", worker_output_tail)
                         raise RuntimeError("Конвертер завершился без результата")
                     payload = json.loads(result_path.read_text(encoding="utf-8"))
                     if process.returncode != 0 or not payload.get("ok"):
+                        if worker_output_tail:
+                            logger.error("Conversion worker failed: %s", worker_output_tail)
                         raise RuntimeError(payload.get("error", "Не удалось обработать файл"))
                     raw_output_path = Path(payload.get("output_path", ""))
                     if raw_output_path.is_symlink():
@@ -154,6 +174,13 @@ class ConversionRunner:
             current = self.active.get(user_id)
             if current and current[0] == job_id:
                 self.active.pop(user_id, None)
+
+    @staticmethod
+    def _read_worker_output(path: Path, limit: int = 4000) -> str:
+        try:
+            return path.read_bytes()[-limit:].decode("utf-8", errors="replace").strip()
+        except OSError:
+            return ""
 
     async def _terminate_process_tree(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:

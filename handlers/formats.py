@@ -34,7 +34,6 @@ def formats_kb() -> ReplyKeyboardMarkup:
 @formats_router.message(F.text == "🎞 Форматы")
 async def choose_format(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    print(f"[FORMATS DEBUG] 🎞 FORMATS BUTTON CLICKED in formats.py for user {user_id}")
     await state.set_state(FormatStates.waiting_format)
     await answer_editable(message, "🎞 Выберите формат для конвертации 👇", reply_markup=formats_kb())
 

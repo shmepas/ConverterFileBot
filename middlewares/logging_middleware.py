@@ -2,7 +2,11 @@ from aiogram import BaseMiddleware
 from aiogram.types import Update, Message, CallbackQuery
 from data_base import db  # твой db.py
 import html
+import logging
 from datetime import datetime, timedelta
+
+
+logger = logging.getLogger(__name__)
 
 # Временной порог для игнорирования повторных действий (секунды)
 DUPLICATE_TIME_THRESHOLD = 2  # если повтор в течение 2 секунд, не логируем
@@ -20,6 +24,8 @@ class LoggingMiddleware(BaseMiddleware):
         # ----------------------
         if event.message:
             msg: Message = event.message
+            if msg.from_user is None:
+                return await handler(event, data)
             user_id = msg.from_user.id
             username = msg.from_user.username
             first_name = msg.from_user.first_name
@@ -57,14 +63,15 @@ class LoggingMiddleware(BaseMiddleware):
         # Логирование в базу с проверкой на дубликат
         # ----------------------
         if user_id and action:
-            last_logs = await db.get_user_logs(limit=1)
-            if last_logs and last_logs[0]["user_id"] == user_id and last_logs[0]["action"] == action:
+            last_log = await db.get_latest_user_action(user_id)
+            if last_log and last_log["action"] == action:
                 # Проверка времени последнего действия
-                last_time = datetime.strptime(last_logs[0]["timestamp"], "%Y-%m-%d %H:%M:%S")
-                now = datetime.now()
-                if (now - last_time) < timedelta(seconds=DUPLICATE_TIME_THRESHOLD):
-                    # Дублирование в пределах порога, не логируем
-                    return await handler(event, data)
+                try:
+                    last_time = datetime.strptime(last_log["timestamp"], "%Y-%m-%d %H:%M:%S")
+                    if datetime.now() - last_time < timedelta(seconds=DUPLICATE_TIME_THRESHOLD):
+                        return await handler(event, data)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring malformed timestamp for user action log")
 
             # Сохраняем действие
             await db.log_action(

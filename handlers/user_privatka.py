@@ -1,4 +1,5 @@
 import os
+import logging
 import traceback
 import tempfile
 import uuid
@@ -23,6 +24,7 @@ from utiles.progress_tracker import progress_tracker
 from utiles.conversion_workflow import ConversionRejected, process_conversion
 
 user_privatka_router = Router()
+logger = logging.getLogger(__name__)
 user_privatka_router.message.filter(lambda message: message.chat.type == "private")
 
 # ------------------------------
@@ -168,9 +170,9 @@ async def reload_cmd(message: types.Message, state: FSMContext):
                     module = sys.modules[module_name]
                     importlib.reload(module)
                     reloaded_modules.append(module_name)
-                    print(f"🔄 Перезагружен модуль: {module_name}")
+                    logger.debug("Reloaded module %s", module_name)
                 except Exception as e:
-                    print(f"❌ Ошибка при перезагрузке {module_name}: {e}")
+                    logger.exception("Could not reload module %s", module_name)
 
         success_msg = f"""✅ **Код успешно перезагружен!**
 
@@ -417,12 +419,6 @@ async def handle_file(message: types.Message, state: FSMContext):
         # Let the admin conversion router consume files during its format flow.
         raise SkipHandler
     user_id = message.from_user.id
-    print(f"[USER_PRIVATKA DEBUG] 📁 DOCUMENT RECEIVED via user_privatka.py for user {user_id}")
-    print(f"[USER_PRIVATKA DEBUG] File name: {message.document.file_name}")
-    print(f"[USER_PRIVATKA DEBUG] File size: {message.document.file_size}")
-    print(f"[USER_PRIVATKA DEBUG] Current state: {await state.get_state()}")
-    print(f"[USER_PRIVATKA DEBUG] File type: {message.document.mime_type}")
-
     await log_action(user_id, f"Отправил файл: {message.document.file_name}")
 
     file = message.document
@@ -480,7 +476,7 @@ async def handle_file(message: types.Message, state: FSMContext):
             raise Exception("Файл не был скачан")
 
         # Валидация загруженного файла
-        print(f"🔍 Валидация загруженного файла: {file_path}")
+        logger.debug("Validating uploaded file for user_id=%s", user_id)
 
         detected_type = file_validator.detect_file_type(file_path)
         available_formats = file_validator.TARGET_FORMATS_BY_INPUT_TYPE.get(detected_type, [])
@@ -597,9 +593,9 @@ async def show_payments_handler(message: types.Message, state: FSMContext):
 
     try:
         payments = await db.get_user_payments(user_id)
-    except Exception as e:
+    except Exception:
         await answer_editable(message, "⚠️ Ошибка при получении истории платежей.")
-        print("get_user_payments error:", e)
+        logger.exception("Could not read payment history for user_id=%s", user_id)
         # Возвращаем в главное меню при ошибке
         await state.set_state(MenuStates.main)
         kb = await build_dynamic_keyboard(user_id)

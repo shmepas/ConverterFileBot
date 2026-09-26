@@ -2,9 +2,13 @@
 Модуль для отслеживания прогресса операций конвертации
 """
 import asyncio
+import logging
 import time
 from typing import Callable, Optional
 from aiogram.types import Message
+
+
+logger = logging.getLogger(__name__)
 
 class ProgressTracker:
     """Класс для отслеживания прогресса операций"""
@@ -30,9 +34,9 @@ class ProgressTracker:
         try:
             progress_text = self._format_progress_message(track_info)
             await message.edit_text(progress_text)
-        except Exception as e:
+        except Exception:
             # Игнорируем ошибки редактирования сообщения (например, если сообщение было удалено)
-            print(f"⚠️ Не удалось отправить прогресс-сообщение: {str(e)}")
+            logger.debug("Unable to send initial conversion progress", exc_info=True)
             # Удаляем из активных треков, так как сообщение недоступно
             if user_id in self.active_tracks:
                 del self.active_tracks[user_id]
@@ -60,9 +64,9 @@ class ProgressTracker:
         try:
             progress_text = self._format_progress_message(track_info)
             await track_info['message'].edit_text(progress_text)
-        except Exception as e:
+        except Exception:
             # Игнорируем ошибки обновления сообщения (например, если сообщение было удалено)
-            print(f"⚠️ Не удалось обновить прогресс-сообщение: {str(e)}")
+            logger.debug("Unable to update conversion progress", exc_info=True)
             # Удаляем из активных треков, так как сообщение недоступно
             if user_id in self.active_tracks:
                 del self.active_tracks[user_id]
@@ -95,9 +99,9 @@ class ProgressTracker:
 
         try:
             await track_info['message'].edit_text(final_text)
-        except Exception as e:
+        except Exception:
             # Игнорируем ошибки редактирования сообщения (например, если сообщение было удалено)
-            print(f"⚠️ Не удалось обновить финальное сообщение: {str(e)}")
+            logger.debug("Unable to update final conversion progress", exc_info=True)
 
         # Удаляем из активных треков
         del self.active_tracks[user_id]

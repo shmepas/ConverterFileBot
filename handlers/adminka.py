@@ -1,5 +1,9 @@
 import os
 import tempfile
+import logging
+import shutil
+from datetime import datetime, timedelta
+from pathlib import Path
 from html import escape
 import traceback
 import zipfile
@@ -16,15 +20,19 @@ except Exception:
     fitz = None  # Безопасно, если не установлен
 
 from aiogram import types, Router, F
+import aiosqlite
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from moviepy.editor import VideoFileClip
 from utils import FFMPEG_BINARY, compress_video_ffmpeg_async, convert_video_to_gif_ffmpeg_async, answer_editable
 from converter_service import file_converter
 from utiles.progress_tracker import progress_tracker
+from utiles.logging_config import latest_error
+from utiles.conversion_runner import conversion_runner
+from data_base import db
+from data_base.backup import BACKUP_DIR
 
 from data_base.db import (
     log_action, is_admin, is_super_admin, has_admin_access,
@@ -32,11 +40,12 @@ from data_base.db import (
     get_all_subscriptions, get_pending_payments, mark_payment_completed,
     get_all_payments,
     activate_premium_subscription, deactivate_subscription,
-    get_conversion_performance_stats,
+    get_conversion_performance_stats, get_open_support_ticket_count,
 )
 
 admin_router = Router()
 PAGE_SIZE = 20
+logger = logging.getLogger(__name__)
 
 
 async def _is_admin_user(message: types.Message) -> bool:
@@ -73,6 +82,8 @@ class FormatStates(StatesGroup):
 # ------------------------------
 async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
     kb_builder = ReplyKeyboardBuilder()
+    open_ticket_count = await get_open_support_ticket_count()
+    tickets_label = f"🎫 Тикеты ({open_ticket_count})" if open_ticket_count else "🎫 Тикеты"
     if await is_super_admin(user_id):
         # Для супер-админа - добавляем управление подписками
         kb_builder.row(
@@ -86,12 +97,13 @@ async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
         kb_builder.row(
             KeyboardButton(text="🧾 Все платежи"),
             KeyboardButton(text="🎞 Форматы"),
-            KeyboardButton(text="🎫 Тикеты")
+            KeyboardButton(text=tickets_label)
         )
         kb_builder.row(
             KeyboardButton(text="📊 Статистика производительности"),
-            KeyboardButton(text="⬅️ Закрыть админку")
+            KeyboardButton(text="🩺 Состояние бота")
         )
+        kb_builder.row(KeyboardButton(text="⬅️ Закрыть админку"))
     elif await is_admin(user_id):
         # Для обычного админа - просмотр подписок без управления
         kb_builder.row(
@@ -101,10 +113,99 @@ async def admin_main_kb(user_id: int) -> types.ReplyKeyboardMarkup:
         kb_builder.row(
             KeyboardButton(text="💎 Просмотр подписок"),
             KeyboardButton(text="🎞 Форматы"),
-            KeyboardButton(text="🎫 Тикеты")
+            KeyboardButton(text=tickets_label)
         )
         kb_builder.row(KeyboardButton(text="⬅️ Закрыть админку"))
     return kb_builder.as_markup(resize_keyboard=True)
+
+
+def _format_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if amount < 1024 or unit == "ТБ":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+
+
+async def _build_bot_health_report() -> str:
+    db_path = Path(db.DB_PATH)
+    db_status = "недоступна"
+    users_count = open_tickets = waiting_tickets = fsm_sessions = schema_version = 0
+    conversion_stats = {"successful_conversions": 0, "failed_conversions": 0}
+    try:
+        async with aiosqlite.connect(db.DB_PATH, timeout=5) as connection:
+            async with connection.execute("PRAGMA quick_check") as cursor:
+                result = await cursor.fetchone()
+            db_status = "OK" if result and result[0] == "ok" else "ошибка целостности"
+            async with connection.execute("SELECT COUNT(*) FROM users") as cursor:
+                users_count = (await cursor.fetchone())[0]
+            async with connection.execute(
+                "SELECT COUNT(*) FROM support_tickets WHERE status = 'open'"
+            ) as cursor:
+                open_tickets = (await cursor.fetchone())[0]
+            async with connection.execute(
+                "SELECT COUNT(*) FROM support_tickets WHERE status = 'waiting_user'"
+            ) as cursor:
+                waiting_tickets = (await cursor.fetchone())[0]
+            async with connection.execute(
+                "SELECT COUNT(*) FROM fsm_sessions WHERE state IS NOT NULL"
+            ) as cursor:
+                fsm_sessions = (await cursor.fetchone())[0]
+            async with connection.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+            ) as cursor:
+                schema_version = (await cursor.fetchone())[0]
+            since = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            async with connection.execute(
+                "SELECT SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) "
+                "FROM conversion_history WHERE created_at >= ?",
+                (since,),
+            ) as cursor:
+                counts = await cursor.fetchone()
+            conversion_stats = {
+                "successful_conversions": counts[0] or 0,
+                "failed_conversions": counts[1] or 0,
+            }
+    except Exception:
+        logger.exception("Admin health report could not query the database")
+
+    try:
+        free_space = shutil.disk_usage(Path(__file__).resolve().parents[1]).free
+        disk_text = _format_bytes(free_space)
+    except OSError:
+        disk_text = "не удалось проверить"
+
+    backups = sorted(
+        BACKUP_DIR.glob("bot_database_*.sqlite3"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ) if BACKUP_DIR.is_dir() else []
+    if backups:
+        backup_time = datetime.fromtimestamp(backups[0].stat().st_mtime).strftime("%d.%m %H:%M")
+        backup_text = f"{backup_time} · {_format_bytes(backups[0].stat().st_size)}"
+    else:
+        backup_text = "нет резервной копии"
+
+    last_error = latest_error()
+    last_error_text = (
+        f"{last_error[0].strftime('%d.%m %H:%M:%S')} · {escape(last_error[1])}"
+        if last_error else "ошибок с момента запуска не зарегистрировано"
+    )
+    db_size = _format_bytes(db_path.stat().st_size) if db_path.is_file() else "файл отсутствует"
+    return (
+        "🩺 <b>Состояние бота</b>\n\n"
+        f"База: <b>{db_status}</b> · {db_size}\n"
+        f"Схема БД: версия {schema_version} · пользователей: {users_count}\n"
+        f"Тикеты: ожидают админа — {open_tickets}, ожидают пользователя — {waiting_tickets}\n"
+        f"Конвертации за 24 ч: успешно — {conversion_stats['successful_conversions']}, "
+        f"ошибки — {conversion_stats['failed_conversions']}\n"
+        f"Очередь конвертации: выполняется — {conversion_runner.running_count}, "
+        f"в очереди — {conversion_runner.queued_count}\n"
+        f"Активные диалоги: {fsm_sessions} · свободно на диске: {disk_text}\n"
+        f"Последний бэкап: {backup_text}\n"
+        f"Последняя ошибка: {last_error_text}"
+    )
 
 # ------------------------------
 # Клавиатура выбора формата
@@ -836,6 +937,24 @@ async def subscription_duration_handler(message: types.Message, state: FSMContex
         await state.set_state(AdminStates.main)
         kb = await admin_main_kb(user_id)
         await answer_editable(message, "Возврат в главное меню админки 👇", reply_markup=kb)
+
+@admin_router.message(F.text == "🩺 Состояние бота")
+async def bot_health_handler(message: types.Message, state: FSMContext):
+    """Show a compact operational snapshot to the super-admin."""
+    user_id = message.from_user.id
+    if not await is_super_admin(user_id):
+        await answer_editable(message, "❌ Статус бота доступен только супер-админу.")
+        return
+    await log_action(user_id, "Просматривает состояние бота")
+    try:
+        report = await _build_bot_health_report()
+    except Exception:
+        logger.exception("Failed to build admin health report")
+        report = "Не удалось получить часть диагностических данных. Подробности записаны в журнал."
+    await answer_editable(
+        message, report, parse_mode="HTML", reply_markup=await admin_main_kb(user_id)
+    )
+
 
 @admin_router.message(F.text == "📊 Статистика производительности")
 async def performance_stats_handler(message: types.Message, state: FSMContext):

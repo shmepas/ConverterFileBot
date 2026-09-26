@@ -1,7 +1,7 @@
 aiogram==3.22.0
 aiosqlite==0.21.0
 imageio-ffmpeg==0.6.0
-moviepy==1.0.3
+moviepy==2.2.1
 Pillow==11.3.0
 PyMuPDF==1.26.5
 pypandoc==1.15

@@ -4,8 +4,12 @@
 import time
 import functools
 import asyncio
+import logging
 from datetime import datetime
 from data_base.db import log_action
+
+
+logger = logging.getLogger(__name__)
 
 def measure_time(func):
     """Декоратор для измерения времени выполнения функции (поддерживает sync и async)"""
@@ -19,14 +23,14 @@ def measure_time(func):
             async def async_wrapper():
                 result = await func(*args, **kwargs)
                 duration = time.time() - start_time
-                print(f"⏱️ {func.__name__} выполнился за {duration:.2f} секунд")
+                logger.info("%s completed in %.2f seconds", func.__name__, duration)
                 return result
             return async_wrapper()
         else:
             # Для sync функций выполняем синхронно
             result = func(*args, **kwargs)
             duration = time.time() - start_time
-            print(f"⏱️ {func.__name__} выполнился за {duration:.2f} секунд")
+            logger.info("%s completed in %.2f seconds", func.__name__, duration)
             return result
 
     return wrapper
@@ -38,8 +42,8 @@ def log_performance(user_id: int, operation: str, duration: float, success: bool
         message = f"PERF: {operation} - {duration:.2f}s - {status}"
         # Асинхронно логируем
         asyncio.create_task(log_action(user_id, message))
-    except Exception as e:
-        print(f"❌ Ошибка логирования производительности: {e}")
+    except Exception:
+        logger.exception("Could not schedule performance log")
 
 # Глобальные счетчики для статистики
 conversion_stats = {
@@ -92,7 +96,7 @@ def reset_conversion_stats():
         'failed_conversions': 0,
         'average_time': 0.0
     }
-    print("🔄 Статистика конвертаций сброшена")
+    logger.info("In-memory conversion counters reset")
 
 def get_conversion_stats() -> dict:
     """Получение статистики конвертаций"""
@@ -145,8 +149,8 @@ def log_conversion_attempt(user_id: int, format_type: str, attempt: int, method:
         with open(text_log_file, "a", encoding="utf-8") as f:
             f.write(log_line)
 
-    except Exception as e:
-        print(f"❌ Ошибка при записи лога конвертации: {e}")
+    except Exception:
+        logger.exception("Could not write conversion-attempt log")
 
 def get_conversion_logs(user_id: int = None, date: str = None, limit: int = 100) -> list:
     """Получение логов конвертаций для анализа"""
@@ -195,8 +199,8 @@ def get_conversion_logs(user_id: int = None, date: str = None, limit: int = 100)
 
         return logs[-limit:]  # Возвращаем последние записи
 
-    except Exception as e:
-        print(f"❌ Ошибка при чтении логов конвертации: {e}")
+    except Exception:
+        logger.exception("Could not read conversion-attempt logs")
         return []
 
 def get_conversion_analytics(days: int = 7) -> dict:
@@ -277,6 +281,6 @@ def get_conversion_analytics(days: int = 7) -> dict:
 
         return analytics
 
-    except Exception as e:
-        print(f"❌ Ошибка при расчете аналитики: {e}")
+    except Exception:
+        logger.exception("Could not calculate conversion analytics")
         return {}

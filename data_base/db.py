@@ -1,12 +1,76 @@
 import aiosqlite
 from datetime import datetime, timedelta
+import logging
 import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "bot_database.db")
+logger = logging.getLogger(__name__)
 
 
 class SupportTicketLimitReached(Exception):
     """Raised when a user reaches the active or daily ticket creation limit."""
+
+
+async def _migration_add_fsm_sessions(connection: aiosqlite.Connection) -> None:
+    await connection.execute(
+        "CREATE TABLE IF NOT EXISTS fsm_sessions ("
+        "storage_key TEXT PRIMARY KEY, state TEXT, data_json TEXT NOT NULL DEFAULT '{}', "
+        "updated_at REAL NOT NULL)"
+    )
+    await connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fsm_sessions_updated ON fsm_sessions(updated_at)"
+    )
+
+
+async def _migration_add_ticket_workflow_fields(connection: aiosqlite.Connection) -> None:
+    async with connection.execute("PRAGMA table_info(support_tickets)") as cursor:
+        ticket_columns = {row[1] for row in await cursor.fetchall()}
+    if "assigned_admin_id" not in ticket_columns:
+        await connection.execute(
+            "ALTER TABLE support_tickets ADD COLUMN assigned_admin_id INTEGER"
+        )
+
+    async with connection.execute("PRAGMA table_info(support_ticket_messages)") as cursor:
+        message_columns = {row[1] for row in await cursor.fetchall()}
+    attachment_columns = {
+        "attachment_type": "TEXT CHECK (attachment_type IS NULL OR attachment_type IN ('photo', 'document'))",
+        "attachment_file_id": "TEXT",
+        "attachment_file_name": "TEXT",
+    }
+    for column, declaration in attachment_columns.items():
+        if column not in message_columns:
+            await connection.execute(
+                f"ALTER TABLE support_ticket_messages ADD COLUMN {column} {declaration}"
+            )
+    await connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_support_tickets_assigned_status "
+        "ON support_tickets(assigned_admin_id, status, created_at DESC)"
+    )
+
+
+async def _run_schema_migrations(connection: aiosqlite.Connection) -> None:
+    """Apply additive, numbered schema changes once per SQLite database."""
+    await connection.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+    )
+    migrations = (
+        (1, "persistent_fsm_sessions", _migration_add_fsm_sessions),
+        (2, "ticket_attachments_and_assignment", _migration_add_ticket_workflow_fields),
+    )
+    for version, name, apply in migrations:
+        async with connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+        ) as cursor:
+            if await cursor.fetchone():
+                continue
+        await apply(connection)
+        await connection.execute(
+            "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+            (version, name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        await connection.commit()
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
@@ -130,6 +194,7 @@ async def init_db():
             status TEXT NOT NULL DEFAULT 'open',
             admin_reply TEXT,
             replied_by INTEGER,
+            assigned_admin_id INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
@@ -150,6 +215,9 @@ async def init_db():
             sender_id INTEGER NOT NULL,
             sender_role TEXT NOT NULL CHECK (sender_role IN ('user', 'admin')),
             message TEXT NOT NULL,
+            attachment_type TEXT CHECK (attachment_type IS NULL OR attachment_type IN ('photo', 'document')),
+            attachment_file_id TEXT,
+            attachment_file_name TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
         )
@@ -239,7 +307,7 @@ async def init_db():
             # Older versions keyed this table by user_id alone; the current
             # schema uses the composite key (user_id, date).
             if len(primary_key_columns) == 1 and primary_key_columns[0][1] == "user_id":
-                print("Миграция таблицы daily_conversion_counters...")
+                logger.info("Migrating legacy daily conversion counters")
                 column_names = {column[1] for column in columns}
                 if "date" in column_names:
                     cursor = await db.execute(
@@ -284,9 +352,11 @@ async def init_db():
                             (user_id, counter_date, count or 0),
                         )
                 await db.commit()
-                print("Миграция завершена")
+                logger.info("Legacy daily conversion counters migrated")
         except Exception as e:
-            print(f"Ошибка миграции: {e}")
+            logger.exception("Legacy daily counter migration failed")
+
+        await _run_schema_migrations(db)
 
 async def add_user(user_id: int, username: str, first_name: str, last_name: str):
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
@@ -321,21 +391,28 @@ async def log_action(user_id: int, action: str, username: str = None, first_name
                 VALUES (?, ?, ?)
             """, (user_id, action[:500], datetime.now().strftime("%Y-%m-%d %H:%M:%S")))  # Ограничиваем длину action
             await db.commit()
-    except Exception as e:
-        # Логируем ошибку в файл, но не прерываем выполнение
-        try:
-            import os
-            os.makedirs("logs", exist_ok=True)
-            with open("logs/db_error.log", "a", encoding="utf-8") as f:
-                f.write(f"DB Error in log_action: {e}\n")
-        except Exception:
-            pass
+    except Exception:
+        logger.exception("Failed to save user action")
 
 async def log_system_event(action: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     pid = os.getpid()
     full_action = f"{action} | PID: {pid} | {timestamp}"
     await log_action(user_id=0, action=full_action)
+
+
+async def get_latest_user_action(user_id: int) -> dict | None:
+    """Read only one user's last action for duplicate-update suppression."""
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT action, timestamp FROM user_actions WHERE user_id = ? "
+            "ORDER BY timestamp DESC, id DESC LIMIT 1",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
 
 async def get_user_logs(limit: int = 50):
     """Получение логов с улучшенной производительностью и валидацией."""
@@ -352,15 +429,8 @@ async def get_user_logs(limit: int = 50):
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
-    except Exception as e:
-        # Логируем ошибку, но возвращаем пустой список
-        try:
-            import os
-            os.makedirs("logs", exist_ok=True)
-            with open("logs/db_error.log", "a", encoding="utf-8") as f:
-                f.write(f"DB Error in get_user_logs: {e}\n")
-        except Exception:
-            pass
+    except Exception:
+        logger.exception("Failed to read user action logs")
         return []
 
 
@@ -393,54 +463,54 @@ async def is_admin(user_id: int) -> bool:
 
 async def add_admin(user_id: int):
     """Добавляет пользователя в админы с проверками"""
-    print(f"[ADMIN DEBUG] add_admin called for user_id: {user_id}")
+    logger.debug("Admin grant requested for user_id=%s", user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         # Проверяем существование пользователя
         async with db.execute("SELECT user_id, is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
 
         if not user:
-            print(f"[ADMIN DEBUG] User {user_id} not found in database")
+            logger.debug("Admin grant target was not found: user_id=%s", user_id)
             return False, "Пользователь не найден в базе данных"
 
         # Проверяем, не является ли уже админом
         if user[1] == 1:  # user[1] это is_admin
-            print(f"[ADMIN DEBUG] User {user_id} is already admin")
+            logger.debug("Admin grant skipped for existing admin: user_id=%s", user_id)
             return False, "Пользователь уже является админом"
 
         # Добавляем в админы
         await db.execute("UPDATE users SET is_admin = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
-        print(f"[ADMIN DEBUG] add_admin completed for user_id: {user_id}")
+        logger.info("Admin role granted to user_id=%s", user_id)
 
     return True, f"Пользователь {user_id} добавлен как админ"
 
 async def remove_admin(user_id: int):
     """Удаляет пользователя из админов с проверками"""
-    print(f"[ADMIN DEBUG] remove_admin called for user_id: {user_id}")
+    logger.debug("Admin removal requested for user_id=%s", user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         # Проверяем существование пользователя
         async with db.execute("SELECT user_id, is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
 
         if not user:
-            print(f"[ADMIN DEBUG] User {user_id} not found in database")
+            logger.debug("Admin removal target was not found: user_id=%s", user_id)
             return False, "Пользователь не найден в базе данных"
 
         # Проверяем, является ли админом
         if user[1] == 0:  # user[1] это is_admin
-            print(f"[ADMIN DEBUG] User {user_id} is not admin")
+            logger.debug("Admin removal skipped for non-admin user_id=%s", user_id)
             return False, "Пользователь не является админом"
 
         # Удаляем из админов
         await db.execute("UPDATE users SET is_admin = 0 WHERE user_id = ?", (user_id,))
         await db.commit()
-        print(f"[ADMIN DEBUG] remove_admin completed for user_id: {user_id}")
+        logger.info("Admin role removed from user_id=%s", user_id)
 
     return True, f"Пользователь {user_id} удален из админов"
 
 async def init_super_admin(user_id: int):
-    print(f"[ADMIN DEBUG] init_super_admin called for user_id: {user_id}")
+    logger.debug("Super-admin setup requested for user_id=%s", user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM super_admin WHERE user_id = ?", (user_id,)) as cursor:
             exists = await cursor.fetchone()
@@ -450,9 +520,9 @@ async def init_super_admin(user_id: int):
                 VALUES (?, ?)
             """, (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             await db.commit()
-            print(f"[ADMIN DEBUG] super_admin added for user_id: {user_id}")
+            logger.info("Super-admin initialized for user_id=%s", user_id)
         else:
-            print(f"[ADMIN DEBUG] super_admin already exists for user_id: {user_id}")
+            logger.debug("Super-admin already initialized for user_id=%s", user_id)
 
 async def is_super_admin(user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -483,11 +553,33 @@ async def get_admin_user_ids() -> list[int]:
             return [row[0] for row in await cursor.fetchall()]
 
 
-async def create_support_ticket(user_id: int, message: str) -> int:
-    """Create a support ticket and return its ID."""
-    clean_message = message.strip()
+def _prepare_ticket_message(message: str, attachment: dict | None = None) -> tuple[str, str | None, str | None, str | None]:
+    clean_message = message.strip() if isinstance(message, str) else ""
+    attachment_type = file_id = file_name = None
+    if attachment is not None:
+        if not isinstance(attachment, dict):
+            raise ValueError("Invalid ticket attachment")
+        attachment_type = attachment.get("type")
+        file_id = attachment.get("file_id")
+        file_name = attachment.get("file_name")
+        if (
+            attachment_type not in {"photo", "document"}
+            or not isinstance(file_id, str)
+            or not file_id
+            or len(file_id) > 2048
+        ):
+            raise ValueError("Invalid ticket attachment")
+        file_name = file_name[:255] if isinstance(file_name, str) and file_name else None
+        if not clean_message:
+            clean_message = f"Вложение: {file_name or attachment_type}"
     if not clean_message or len(clean_message) > 1800:
         raise ValueError("Ticket message must contain 1 to 1800 characters")
+    return clean_message, attachment_type, file_id, file_name
+
+
+async def create_support_ticket(user_id: int, message: str, *, attachment: dict | None = None) -> int:
+    """Create a support ticket and return its ID."""
+    clean_message, attachment_type, file_id, file_name = _prepare_ticket_message(message, attachment)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     recent_cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
@@ -516,8 +608,10 @@ async def create_support_ticket(user_id: int, message: str) -> int:
         ticket_id = cursor.lastrowid
         await db.execute(
             "INSERT INTO support_ticket_messages "
-            "(ticket_id, sender_id, sender_role, message, created_at) VALUES (?, ?, 'user', ?, ?)",
-            (ticket_id, user_id, clean_message, now),
+            "(ticket_id, sender_id, sender_role, message, attachment_type, "
+            "attachment_file_id, attachment_file_name, created_at) "
+            "VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
+            (ticket_id, user_id, clean_message, attachment_type, file_id, file_name, now),
         )
         await db.commit()
         return ticket_id
@@ -529,7 +623,7 @@ async def get_support_tickets(limit: int = 20, *, user_id: int | None = None,
     limit = max(1, min(int(limit), 100))
     query = (
         "SELECT t.id, t.user_id, t.message, t.status, t.admin_reply, "
-        "t.replied_by, t.created_at, t.updated_at, u.username, u.first_name "
+        "t.replied_by, t.assigned_admin_id, t.created_at, t.updated_at, u.username, u.first_name "
         "FROM support_tickets t LEFT JOIN users u ON u.user_id = t.user_id"
     )
     clauses: list[str] = []
@@ -558,7 +652,7 @@ async def get_support_ticket(ticket_id: int) -> dict | None:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT t.id, t.user_id, t.message, t.status, t.admin_reply, "
-            "t.replied_by, t.created_at, t.updated_at, u.username, u.first_name "
+            "t.replied_by, t.assigned_admin_id, t.created_at, t.updated_at, u.username, u.first_name "
             "FROM support_tickets t LEFT JOIN users u ON u.user_id = t.user_id "
             "WHERE t.id = ?",
             (ticket_id,),
@@ -571,17 +665,18 @@ async def get_support_ticket_messages(ticket_id: int) -> list[dict]:
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT sender_id, sender_role, message, created_at "
+            "SELECT sender_id, sender_role, message, attachment_type, "
+            "attachment_file_id, attachment_file_name, created_at "
             "FROM support_ticket_messages WHERE ticket_id = ? ORDER BY id",
             (ticket_id,),
         ) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
 
 
-async def reply_to_support_ticket(ticket_id: int, admin_id: int, reply: str) -> bool:
-    clean_reply = reply.strip()
-    if not clean_reply or len(clean_reply) > 1800:
-        raise ValueError("Ticket reply must contain 1 to 1800 characters")
+async def reply_to_support_ticket(
+    ticket_id: int, admin_id: int, reply: str, *, attachment: dict | None = None
+) -> bool:
+    clean_reply, attachment_type, file_id, file_name = _prepare_ticket_message(reply, attachment)
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cursor = await db.execute(
@@ -592,18 +687,19 @@ async def reply_to_support_ticket(ticket_id: int, admin_id: int, reply: str) -> 
         if cursor.rowcount == 1:
             await db.execute(
                 "INSERT INTO support_ticket_messages "
-                "(ticket_id, sender_id, sender_role, message, created_at) "
-                "VALUES (?, ?, 'admin', ?, ?)",
-                (ticket_id, admin_id, clean_reply, now),
+                "(ticket_id, sender_id, sender_role, message, attachment_type, "
+                "attachment_file_id, attachment_file_name, created_at) "
+                "VALUES (?, ?, 'admin', ?, ?, ?, ?, ?)",
+                (ticket_id, admin_id, clean_reply, attachment_type, file_id, file_name, now),
             )
         await db.commit()
         return cursor.rowcount == 1
 
 
-async def user_reply_to_support_ticket(ticket_id: int, user_id: int, message: str) -> bool:
-    clean_message = message.strip()
-    if not clean_message or len(clean_message) > 1800:
-        raise ValueError("Ticket message must contain 1 to 1800 characters")
+async def user_reply_to_support_ticket(
+    ticket_id: int, user_id: int, message: str, *, attachment: dict | None = None
+) -> bool:
+    clean_message, attachment_type, file_id, file_name = _prepare_ticket_message(message, attachment)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute(
@@ -614,12 +710,60 @@ async def user_reply_to_support_ticket(ticket_id: int, user_id: int, message: st
         if cursor.rowcount == 1:
             await db.execute(
                 "INSERT INTO support_ticket_messages "
-                "(ticket_id, sender_id, sender_role, message, created_at) "
-                "VALUES (?, ?, 'user', ?, ?)",
-                (ticket_id, user_id, clean_message, now),
+                "(ticket_id, sender_id, sender_role, message, attachment_type, "
+                "attachment_file_id, attachment_file_name, created_at) "
+                "VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
+                (ticket_id, user_id, clean_message, attachment_type, file_id, file_name, now),
             )
         await db.commit()
         return cursor.rowcount == 1
+
+
+async def get_open_support_ticket_count() -> int:
+    """Return the number of tickets currently waiting for an admin."""
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM support_tickets WHERE status = 'open'"
+        ) as cursor:
+            return (await cursor.fetchone())[0]
+
+
+async def claim_support_ticket(ticket_id: int, admin_id: int) -> str | None:
+    """Claim an unassigned ticket or release one's own assignment atomically."""
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT status, assigned_admin_id FROM support_tickets WHERE id = ?",
+            (ticket_id,),
+        ) as cursor:
+            ticket = await cursor.fetchone()
+        async with db.execute(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE user_id = ? AND is_admin = 1) "
+            "OR EXISTS(SELECT 1 FROM super_admin WHERE user_id = ?)",
+            (admin_id, admin_id),
+        ) as cursor:
+            is_admin_user = (await cursor.fetchone())[0]
+        if not ticket or not is_admin_user or ticket[0] == "closed":
+            await db.rollback()
+            return None
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if ticket[1] is None:
+            await db.execute(
+                "UPDATE support_tickets SET assigned_admin_id = ?, updated_at = ? WHERE id = ?",
+                (admin_id, now, ticket_id),
+            )
+            result = "assigned"
+        elif ticket[1] == admin_id:
+            await db.execute(
+                "UPDATE support_tickets SET assigned_admin_id = NULL, updated_at = ? WHERE id = ?",
+                (now, ticket_id),
+            )
+            result = "released"
+        else:
+            await db.rollback()
+            return None
+        await db.commit()
+        return result
 
 
 async def close_support_ticket(ticket_id: int) -> bool:
@@ -898,14 +1042,8 @@ async def add_feedback(name: str, email: str, message: str, user_id: int | None 
             """, (user_id, name, email, message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             await db.commit()
         return True
-    except Exception as e:
-        try:
-            import os
-            os.makedirs("logs", exist_ok=True)
-            with open("logs/db_error.log", "a", encoding="utf-8") as f:
-                f.write(f"DB Error in add_feedback: {e}\n")
-        except Exception:
-            pass
+    except Exception:
+        logger.exception("Failed to save user feedback")
         return False
 
 async def reset_daily_counters():
@@ -916,7 +1054,7 @@ async def reset_daily_counters():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM daily_conversion_counters WHERE date < ?", (yesterday,))
         await db.commit()
-        print(f"[RESET DEBUG] Daily counters reset for dates before {yesterday}")
+        logger.debug("Daily conversion counters before %s removed", yesterday)
 
 async def get_feedbacks(limit: int = 100):
     """Получение обратной связи с улучшенной производительностью."""
@@ -936,14 +1074,8 @@ async def get_feedbacks(limit: int = 100):
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
-    except Exception as e:
-        try:
-            import os
-            os.makedirs("logs", exist_ok=True)
-            with open("logs/db_error.log", "a", encoding="utf-8") as f:
-                f.write(f"DB Error in get_feedbacks: {e}\n")
-        except Exception:
-            pass
+    except Exception:
+        logger.exception("Failed to read feedback entries")
         return []
 
 async def delete_feedback(feedback_id: int):
@@ -1033,7 +1165,7 @@ async def activate_premium_subscription(user_id: int, duration_months: int = 1, 
     """Активирует премиум подписку для пользователя."""
     from datetime import datetime, timedelta
 
-    print(f"[SUBSCRIPTION DEBUG] Activating premium subscription for user_id: {user_id}, duration: {duration_months} months")
+    logger.info("Premium activation started for user_id=%s duration_months=%s", user_id, duration_months)
 
     start_date = datetime.now()
     end_date = start_date + timedelta(days=30 * duration_months)
@@ -1043,7 +1175,7 @@ async def activate_premium_subscription(user_id: int, duration_months: int = 1, 
         async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user_exists = await cursor.fetchone()
             if not user_exists:
-                print(f"[SUBSCRIPTION DEBUG] User {user_id} not found in users table, creating...")
+                logger.debug("Creating user row for subscription target user_id=%s", user_id)
                 # Создаём пользователя если его нет
                 await db.execute("""
                     INSERT INTO users (user_id, username, first_name, last_name, created_at, is_admin)
@@ -1057,7 +1189,7 @@ async def activate_premium_subscription(user_id: int, duration_months: int = 1, 
             VALUES (?, 'premium', 1, ?, ?, CURRENT_TIMESTAMP)
         """, (user_id, start_date.strftime("%Y-%m-%d %H:%M:%S"), end_date.strftime("%Y-%m-%d %H:%M:%S")))
         await db.commit()
-        print(f"[SUBSCRIPTION DEBUG] Subscription activated for user_id: {user_id}")
+        logger.info("Premium subscription activated for user_id=%s", user_id)
 
         # Логируем активацию
         await db.execute("""
@@ -1065,7 +1197,7 @@ async def activate_premium_subscription(user_id: int, duration_months: int = 1, 
             VALUES (?, 0, 'subscription', ?, 'completed', ?, ?)
         """, (user_id, f"{duration_months}_months", admin_notes, start_date.strftime("%Y-%m-%d %H:%M:%S")))
         await db.commit()
-        print(f"[SUBSCRIPTION DEBUG] Payment history logged for user_id: {user_id}")
+        logger.debug("Subscription payment history recorded for user_id=%s", user_id)
 
         # Также создаём бесплатную подписку по умолчанию для новых пользователей
         await db.execute("""
@@ -1085,7 +1217,7 @@ async def deactivate_subscription(user_id: int):
 
 async def get_user_subscription(user_id: int) -> dict:
     """Получает информацию о подписке пользователя."""
-    print(f"[DEBUG SUBSCRIPTION] get_user_subscription called for user {user_id}")
+    logger.debug("Reading subscription for user_id=%s", user_id)
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -1096,10 +1228,10 @@ async def get_user_subscription(user_id: int) -> dict:
             row = await cursor.fetchone()
             if row:
                 subscription = dict(row)
-                print(f"[DEBUG SUBSCRIPTION] Found existing subscription for user {user_id}: {subscription}")
+                logger.debug("Subscription found for user_id=%s plan=%s", user_id, subscription["plan_type"])
                 return subscription
             else:
-                print(f"[DEBUG SUBSCRIPTION] No subscription found for user {user_id}, creating free subscription")
+                logger.debug("Creating default free subscription for user_id=%s", user_id)
                 # Создаем бесплатную подписку по умолчанию
                 await create_free_subscription(user_id)
                 subscription = {
@@ -1108,7 +1240,6 @@ async def get_user_subscription(user_id: int) -> dict:
                     'start_date': None,
                     'end_date': None
                 }
-                print(f"[DEBUG SUBSCRIPTION] Created free subscription for user {user_id}: {subscription}")
                 return subscription
 
 async def create_free_subscription(user_id: int):
@@ -1122,13 +1253,9 @@ async def create_free_subscription(user_id: int):
 
 async def check_user_limits(user_id: int) -> dict:
     """Проверяет лимиты пользователя и возвращает информацию о подписке."""
-    print(f"[DEBUG LIMITS] check_user_limits called for user {user_id}")
-
     subscription = await get_user_subscription(user_id)
-    print(f"[DEBUG LIMITS] User subscription: {subscription}")
 
     if subscription['plan_type'] == 'premium' and subscription['is_active']:
-        print(f"[DEBUG LIMITS] User {user_id} has active premium subscription")
         # Премиум подписка - без ограничений
         return {
             'plan_type': 'premium',
@@ -1140,10 +1267,8 @@ async def check_user_limits(user_id: int) -> dict:
             'supported_formats': 'all'
         }
     else:
-        print(f"[DEBUG LIMITS] User {user_id} is free user, checking conversion count")
         # Бесплатная подписка - с ограничениями
         today_count = await get_daily_conversion_count(user_id)
-        print(f"[DEBUG LIMITS] Today's conversion count for user {user_id}: {today_count}")
 
         limits = {
             'plan_type': 'free',
@@ -1154,7 +1279,6 @@ async def check_user_limits(user_id: int) -> dict:
             'max_file_size': 20 * 1024 * 1024,  # 20 МБ
             'supported_formats': 'basic'  # Основные форматы
         }
-        print(f"[DEBUG LIMITS] Final limits for user {user_id}: {limits}")
         return limits
 
 async def get_daily_conversion_count(user_id: int) -> int:
@@ -1219,16 +1343,12 @@ async def decrement_conversion_count(user_id: int) -> None:
 
 async def get_subscription_status_text(user_id: int) -> str:
     """Возвращает текст статуса подписки для отображения пользователю."""
-    print(f"[DEBUG STATUS] get_subscription_status_text called for user {user_id}")
 
     subscription = await get_user_subscription(user_id)
-    print(f"[DEBUG STATUS] User subscription: {subscription}")
 
     limits = await check_user_limits(user_id)
-    print(f"[DEBUG STATUS] Final limits for status text: {limits}")
 
     if limits['is_premium']:
-        print(f"[DEBUG STATUS] Returning premium status for user {user_id}")
         return f"""💎 **Премиум подписка**
 
 ✅ Безлимитные конвертации
@@ -1245,7 +1365,6 @@ async def get_subscription_status_text(user_id: int) -> str:
 🎯 Основные форматы доступны
 
 💎 Для безлимитного доступа оформите подписку!"""
-        print(f"[DEBUG STATUS] Returning free status for user {user_id}: {limits['current_count']}/{limits['daily_limit']}")
         return status_text
 
 # Инициализация базы данных удалена из импорта модуля

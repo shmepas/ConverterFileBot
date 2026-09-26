@@ -16,9 +16,11 @@ from PIL import Image
 
 from data_base import db
 from data_base.backup import backup_database
+from data_base.fsm_storage import KeyedEventIsolation, SQLiteFSMStorage
 from utiles import conversion_history
 from utiles.conversion_runner import ConversionRunner
 from utiles.file_validator import file_validator
+from aiogram.fsm.storage.base import StorageKey
 
 
 class _FakeProgressMessage:
@@ -35,6 +37,49 @@ class _FakeMessage:
 
     async def answer(self, text, **kwargs):
         return self.progress
+
+
+class _FakeTicketBot:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent.append({"chat_id": chat_id, "text": text, "kwargs": kwargs})
+
+    async def send_photo(self, chat_id, photo, **kwargs):
+        self.sent.append({"chat_id": chat_id, "photo": photo, "kwargs": kwargs})
+
+    async def send_document(self, chat_id, document, **kwargs):
+        self.sent.append({"chat_id": chat_id, "document": document, "kwargs": kwargs})
+
+
+class _FakeTicketMessage:
+    def __init__(self, from_user, text, bot):
+        from types import SimpleNamespace
+
+        self.from_user = from_user
+        self.text = text
+        self.bot = bot
+        self.chat = SimpleNamespace(type="private", id=from_user.id)
+
+    async def answer(self, text, **kwargs):
+        return self
+
+    async def edit_reply_markup(self, **kwargs):
+        return None
+
+
+class _FakeTicketCallback:
+    def __init__(self, message, user_id, data, bot):
+        from types import SimpleNamespace
+
+        self.message = message
+        self.from_user = SimpleNamespace(id=user_id)
+        self.data = data
+        self.bot = bot
+
+    async def answer(self, text=None, **kwargs):
+        return None
 
 
 class ProjectHardeningTests(unittest.IsolatedAsyncioTestCase):
@@ -78,6 +123,94 @@ class ProjectHardeningTests(unittest.IsolatedAsyncioTestCase):
             [t["id"] for t in await db.get_support_tickets(status="closed", include_closed=True)],
             [open_id],
         )
+
+    async def test_ticket_attachments_assignment_and_open_counter(self):
+        await db.add_user(9001, "admin", "Admin", "")
+        await db.add_user(9002, "second_admin", "Second", "Admin")
+        async with aiosqlite.connect(db.DB_PATH) as connection:
+            await connection.execute("UPDATE users SET is_admin = 1 WHERE user_id IN (9001, 9002)")
+            await connection.commit()
+
+        attachment = {"type": "document", "file_id": "telegram-file-id", "file_name": "trace.log"}
+        ticket_id = await db.create_support_ticket(1001, "", attachment=attachment)
+        self.assertEqual(await db.get_open_support_ticket_count(), 1)
+        self.assertEqual(await db.claim_support_ticket(ticket_id, 9001), "assigned")
+        self.assertIsNone(await db.claim_support_ticket(ticket_id, 9002))
+        ticket = await db.get_support_ticket(ticket_id)
+        self.assertEqual(ticket["assigned_admin_id"], 9001)
+        messages = await db.get_support_ticket_messages(ticket_id)
+        self.assertEqual(messages[0]["message"], "Вложение: trace.log")
+        self.assertEqual(messages[0]["attachment_file_id"], "telegram-file-id")
+
+        admin_attachment = {"type": "photo", "file_id": "admin-photo-id"}
+        self.assertTrue(await db.reply_to_support_ticket(ticket_id, 9001, "", attachment=admin_attachment))
+        self.assertEqual(await db.get_open_support_ticket_count(), 0)
+        self.assertEqual(await db.claim_support_ticket(ticket_id, 9001), "released")
+        self.assertTrue(await db.user_reply_to_support_ticket(ticket_id, 1001, "", attachment={
+            "type": "photo", "file_id": "user-photo-id",
+        }))
+        self.assertEqual(await db.get_open_support_ticket_count(), 1)
+        self.assertEqual(len(await db.get_support_ticket_messages(ticket_id)), 3)
+
+        self.assertTrue(await db.close_support_ticket(ticket_id))
+        self.assertEqual(await db.get_open_support_ticket_count(), 0)
+        with self.assertRaises(ValueError):
+            await db.create_support_ticket(1002, "", attachment={"type": "photo", "file_id": ""})
+
+    async def test_admin_keyboard_shows_open_ticket_counter(self):
+        from handlers.adminka import admin_main_kb
+
+        async with aiosqlite.connect(db.DB_PATH) as connection:
+            await connection.execute("INSERT INTO super_admin(user_id) VALUES (1001)")
+            await connection.commit()
+        await db.create_support_ticket(1002, "Нужна помощь")
+        keyboard = await admin_main_kb(1001)
+        labels = {button.text for row in keyboard.keyboard for button in row}
+        self.assertIn("🎫 Тикеты (1)", labels)
+
+    async def test_legacy_ticket_schema_is_upgraded_by_numbered_migrations(self):
+        legacy_path = self.root / "legacy.sqlite3"
+        async with aiosqlite.connect(legacy_path) as connection:
+            await connection.execute("""
+                CREATE TABLE support_tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    admin_reply TEXT,
+                    replied_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            await connection.execute("""
+                CREATE TABLE support_ticket_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticket_id INTEGER NOT NULL,
+                    sender_id INTEGER NOT NULL,
+                    sender_role TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            await connection.commit()
+
+        current_path = db.DB_PATH
+        try:
+            db.DB_PATH = str(legacy_path)
+            await db.init_db()
+            async with aiosqlite.connect(db.DB_PATH) as connection:
+                async with connection.execute("PRAGMA table_info(support_ticket_messages)") as cursor:
+                    message_columns = {row[1] for row in await cursor.fetchall()}
+                async with connection.execute("PRAGMA table_info(support_tickets)") as cursor:
+                    ticket_columns = {row[1] for row in await cursor.fetchall()}
+                async with connection.execute("SELECT version FROM schema_migrations ORDER BY version") as cursor:
+                    versions = [row[0] for row in await cursor.fetchall()]
+            self.assertTrue({"attachment_type", "attachment_file_id", "attachment_file_name"} <= message_columns)
+            self.assertIn("assigned_admin_id", ticket_columns)
+            self.assertEqual(versions, [1, 2])
+        finally:
+            db.DB_PATH = current_path
 
     async def test_ticket_creation_limit_is_serialized_between_concurrent_requests(self):
         await db.create_support_ticket(1001, "Первый активный")
@@ -161,6 +294,19 @@ class ProjectHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["formats_used"]["PNG → JPG"]["count"], 2)
         self.assertEqual(stats["formats_used"]["PNG → JPG"]["successful_count"], 1)
 
+    async def test_latest_user_action_query_is_scoped_and_health_report_reads_metrics(self):
+        await db.log_action(1001, "Пользовательское действие")
+        await db.log_action(1002, "Действие другого пользователя")
+        latest = await db.get_latest_user_action(1001)
+        self.assertEqual(latest["action"], "Пользовательское действие")
+
+        from handlers.adminka import _build_bot_health_report
+
+        report = await _build_bot_health_report()
+        self.assertIn("База: <b>OK</b>", report)
+        self.assertIn("Схема БД: версия 2", report)
+        self.assertIn("пользователей: 2", report)
+
     async def test_expired_retained_file_cleanup_preserves_recent_performance_history(self):
         source = self.root / "retained.txt"
         source.write_text("source", encoding="utf-8")
@@ -204,6 +350,176 @@ class ProjectHardeningTests(unittest.IsolatedAsyncioTestCase):
     async def test_conversion_cooldown_is_atomic(self):
         self.assertTrue(await db.claim_conversion_cooldown(1001, cooldown_seconds=5))
         self.assertFalse(await db.claim_conversion_cooldown(1001, cooldown_seconds=5))
+
+    async def test_fsm_state_and_data_survive_storage_recreation(self):
+        key = StorageKey(bot_id=77, chat_id=1001, user_id=1001)
+        storage = SQLiteFSMStorage(ttl_seconds=3600)
+        await storage.set_state(key, "TicketStates:waiting_admin_reply")
+        await storage.set_data(key, {"ticket_id": 12, "selected_format": "PNG → JPG"})
+
+        restarted_storage = SQLiteFSMStorage(ttl_seconds=3600)
+        self.assertEqual(await restarted_storage.get_state(key), "TicketStates:waiting_admin_reply")
+        self.assertEqual(
+            await restarted_storage.get_data(key),
+            {"ticket_id": 12, "selected_format": "PNG → JPG"},
+        )
+
+    async def test_fsm_storage_expires_idle_sessions_and_scopes_all_key_fields(self):
+        storage = SQLiteFSMStorage(ttl_seconds=60)
+        first_key = StorageKey(bot_id=77, chat_id=1001, user_id=1001, destiny="default")
+        other_key = StorageKey(bot_id=77, chat_id=1001, user_id=1001, destiny="admin")
+        await storage.set_state(first_key, "state-one")
+        await storage.set_state(other_key, "state-two")
+        self.assertEqual(await storage.get_state(other_key), "state-two")
+
+        async with aiosqlite.connect(db.DB_PATH) as connection:
+            expired = (datetime.now() - timedelta(minutes=5)).timestamp()
+            await connection.execute(
+                "UPDATE fsm_sessions SET updated_at = ? WHERE storage_key = ?",
+                (expired, storage._storage_key(first_key)),
+            )
+            await connection.commit()
+
+        self.assertIsNone(await storage.get_state(first_key))
+        self.assertEqual(await storage.get_state(other_key), "state-two")
+
+    async def test_fsm_event_isolation_serializes_each_key_and_releases_locks(self):
+        isolation = KeyedEventIsolation()
+        key = StorageKey(bot_id=77, chat_id=1001, user_id=1001)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        order = []
+
+        async def first_update():
+            async with isolation.lock(key):
+                order.append("first-start")
+                entered.set()
+                await release.wait()
+                order.append("first-end")
+
+        async def second_update():
+            async with isolation.lock(key):
+                order.append("second")
+
+        first = asyncio.create_task(first_update())
+        await entered.wait()
+        second = asyncio.create_task(second_update())
+        await asyncio.sleep(0)
+        self.assertEqual(order, ["first-start"])
+        release.set()
+        await asyncio.gather(first, second)
+        self.assertEqual(order, ["first-start", "first-end", "second"])
+        self.assertEqual(isolation._locks, {})
+
+    async def test_ticket_handlers_cover_user_admin_reply_and_close_flow(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from aiogram.fsm.context import FSMContext
+        from handlers import tickets
+
+        await db.add_user(9001, "admin", "Admin", "")
+        async with aiosqlite.connect(db.DB_PATH) as connection:
+            await connection.execute("UPDATE users SET is_admin = 1 WHERE user_id = 9001")
+            await connection.commit()
+
+        storage = SQLiteFSMStorage(ttl_seconds=3600)
+        user_state = FSMContext(
+            storage=storage,
+            key=StorageKey(bot_id=77, chat_id=1001, user_id=1001),
+        )
+        admin_state = FSMContext(
+            storage=storage,
+            key=StorageKey(bot_id=77, chat_id=9001, user_id=9001),
+        )
+        bot = _FakeTicketBot()
+
+        def make_message(user_id, text, username):
+            person = SimpleNamespace(
+                id=user_id,
+                username=username,
+                first_name="Test",
+                last_name="User",
+                full_name="Test User",
+            )
+            return _FakeTicketMessage(person, text, bot)
+
+        with patch("handlers.tickets.answer_editable", new=AsyncMock()):
+            await tickets.start_ticket(make_message(1001, "", "tester"), user_state)
+            await tickets.receive_ticket(
+                make_message(1001, "Конвертация завершилась ошибкой", "tester"), user_state
+            )
+            ticket = (await db.get_support_tickets(user_id=1001))[0]
+
+            admin_callback = _FakeTicketCallback(
+                make_message(9001, "", "admin"), 9001,
+                f"ticket:reply:{ticket['id']}", bot,
+            )
+            await tickets.admin_ticket_action(admin_callback, admin_state)
+            await tickets.receive_admin_reply(
+                make_message(9001, "Попробуйте отправить файл повторно", "admin"), admin_state
+            )
+            refreshed = await db.get_support_ticket(ticket["id"])
+            self.assertEqual(refreshed["status"], "waiting_user")
+            self.assertEqual(bot.sent[-1]["chat_id"], 1001)
+
+            user_callback = _FakeTicketCallback(
+                make_message(1001, "", "tester"), 1001,
+                f"ticket:user_reply:{ticket['id']}", bot,
+            )
+            await tickets.start_user_ticket_reply(user_callback, user_state)
+            await tickets.receive_user_ticket_reply(
+                make_message(1001, "Спасибо, заработало", "tester"), user_state
+            )
+            self.assertEqual((await db.get_support_ticket(ticket["id"]))["status"], "open")
+
+            close_callback = _FakeTicketCallback(
+                make_message(9001, "", "admin"), 9001,
+                f"ticket:close:{ticket['id']}", bot,
+            )
+            await tickets.admin_ticket_action(close_callback, admin_state)
+
+        self.assertEqual((await db.get_support_ticket(ticket["id"]))["status"], "closed")
+        self.assertEqual(
+            [row["sender_role"] for row in await db.get_support_ticket_messages(ticket["id"])],
+            ["user", "admin", "user"],
+        )
+
+    async def test_ticket_handler_accepts_and_notifies_about_document_attachment(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from aiogram.fsm.context import FSMContext
+        from handlers import tickets
+
+        await db.add_user(9001, "admin", "Admin", "")
+        async with aiosqlite.connect(db.DB_PATH) as connection:
+            await connection.execute("UPDATE users SET is_admin = 1 WHERE user_id = 9001")
+            await connection.commit()
+
+        storage = SQLiteFSMStorage()
+        state = FSMContext(storage, StorageKey(bot_id=77, chat_id=1001, user_id=1001))
+        bot = _FakeTicketBot()
+        person = SimpleNamespace(
+            id=1001, username="tester", first_name="Test", last_name="User", full_name="Test User"
+        )
+        with patch("handlers.tickets.answer_editable", new=AsyncMock()):
+            await tickets.start_ticket(_FakeTicketMessage(person, "", bot), state)
+            document_message = _FakeTicketMessage(person, None, bot)
+            document_message.caption = "Лог ошибки"
+            document_message.document = SimpleNamespace(
+                file_id="telegram-doc-1", file_size=1024, file_name="error.log"
+            )
+            await tickets.receive_ticket(document_message, state)
+
+        ticket = (await db.get_support_tickets(user_id=1001))[0]
+        messages = await db.get_support_ticket_messages(ticket["id"])
+        self.assertEqual(messages[0]["message"], "Лог ошибки")
+        self.assertEqual(messages[0]["attachment_file_name"], "error.log")
+        self.assertTrue(any(
+            item.get("document") == "telegram-doc-1" and item["chat_id"] == 9001
+            for item in bot.sent
+        ))
 
     async def test_role_keyboards_separate_user_admin_and_super_admin(self):
         from handlers.adminka import admin_main_kb

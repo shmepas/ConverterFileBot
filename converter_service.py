@@ -7,6 +7,7 @@ import tempfile
 import shutil
 import zipfile
 import traceback
+import logging
 from pathlib import Path
 
 try:
@@ -15,7 +16,7 @@ except ImportError:
     fitz = None
 
 from PIL import Image
-from moviepy.editor import VideoFileClip
+from moviepy import AudioFileClip, VideoFileClip
 from PyPDF2 import PdfReader
 
 from utils import FFMPEG_BINARY, convert_audio_ffmpeg_async, compress_video_ffmpeg_async, convert_video_to_gif_ffmpeg_async
@@ -23,6 +24,9 @@ from utiles.performance import measure_time, log_performance, update_conversion_
 from utiles.file_validator import file_validator
 from utiles.progress_tracker import track_conversion_progress, ConversionProgressCallback
 import asyncio
+
+
+logger = logging.getLogger(__name__)
 
 
 class FileConverter:
@@ -53,42 +57,35 @@ class FileConverter:
 
     @measure_time
     def convert_to_mp3(self, input_path: str, output_path: str) -> str:
-        """Конвертирует файл в MP3."""
+        """Конвертирует аудио или извлекает аудио из видео в MP3."""
         try:
             if input_path.lower().endswith((".mp3", ".wav", ".ogg")):
-                # Аудио файл - используем ffmpeg синхронно
+                import subprocess
+
+                cmd = [
+                    FFMPEG_BINARY, "-y", "-i", input_path,
+                    "-acodec", "libmp3lame", "-ab", "128k",
+                    output_path
+                ]
                 try:
-                    import subprocess
-                    cmd = [
-                        FFMPEG_BINARY, "-y", "-i", input_path,
-                        "-acodec", "libmp3lame", "-ab", "128k",
-                        output_path
-                    ]
                     subprocess.run(cmd, check=True, capture_output=True)
-                except subprocess.CalledProcessError as e:
-                    raise RuntimeError(f"FFmpeg error: {e}")
                 except FileNotFoundError:
-                    # Fallback к moviepy если ffmpeg не найден
-                    clip = VideoFileClip(input_path)
-                    clip.audio.write_audiofile(output_path, verbose=False, logger=None)
-                    clip.close()
+                    with AudioFileClip(input_path) as clip:
+                        clip.write_audiofile(output_path, logger=None)
             else:
-                # Видео файл - извлекаем аудио
-                clip = VideoFileClip(input_path)
-                clip.audio.write_audiofile(output_path, verbose=False, logger=None)
-                clip.close()
+                with VideoFileClip(input_path) as clip:
+                    if clip.audio is None:
+                        raise ValueError("В видеофайле нет аудиодорожки")
+                    clip.audio.write_audiofile(output_path, logger=None)
 
-            # Обновляем статистику
-            update_conversion_stats("MP3", 0, True)  # Время будет добавлено декоратором
+            update_conversion_stats("MP3", 0, True)
             return output_path
-
-        except Exception as e:
+        except Exception:
             update_conversion_stats("MP3", 0, False)
-            raise e
+            raise
 
     @measure_time
     def convert_to_mp4(self, input_path: str, output_path: str) -> str:
-
         try:
             import asyncio
             asyncio.run(compress_video_ffmpeg_async(
@@ -96,14 +93,11 @@ class FileConverter:
                 crf=30, max_width=640, audio_bitrate="64k", preset="fast"
             ))
         except Exception:
-
-            clip = VideoFileClip(input_path)
-            clip.write_videofile(
-                output_path, codec="libx264", bitrate="600k",
-                fps=24, audio=True, verbose=False, logger=None
-            )
-            clip.close()
-
+            with VideoFileClip(input_path) as clip:
+                clip.write_videofile(
+                    output_path, codec="libx264", bitrate="600k",
+                    fps=24, audio=True, logger=None
+                )
 
         update_conversion_stats("MP4", 0, True)
         return output_path
@@ -113,16 +107,12 @@ class FileConverter:
         """Конвертирует видео в GIF."""
         try:
             import asyncio
-
             asyncio.run(convert_video_to_gif_ffmpeg_async(
                 input_path, output_path, width=360, fps=10, quality="high"
             ))
         except Exception:
-
-            clip = VideoFileClip(input_path)
-            clip.write_gif(output_path, fps=10, program='ffmpeg')
-            clip.close()
-
+            with VideoFileClip(input_path) as clip:
+                clip.write_gif(output_path, fps=10, logger=None)
 
         update_conversion_stats("GIF", 0, True)
         return output_path
@@ -319,7 +309,7 @@ class FileConverter:
             import asyncio
             asyncio.create_task(progress_callback.set_stage('validating', 10))
 
-        print(f"🔍 Валидация файла для конвертации в {target_format}")
+        logger.debug("Validating input for target format %s", target_format)
         is_valid, error_message, validation_info = file_validator.full_validation(input_path, target_format, user_id)
 
         if not is_valid:
@@ -328,7 +318,10 @@ class FileConverter:
                 asyncio.create_task(progress_callback.complete(False, f"Валидация не пройдена: {error_message}"))
             raise ValueError(f"Файл не прошел валидацию: {error_message}")
 
-        print(f"✅ Файл прошел валидацию (время: {validation_info['validation_time']:.2f}с, размер: {validation_info['file_size']} байт)")
+        logger.debug(
+            "Input validated for %s in %.2fs (%s bytes)",
+            target_format, validation_info["validation_time"], validation_info["file_size"],
+        )
 
         if progress_callback:
             import asyncio
@@ -375,10 +368,10 @@ class FileConverter:
             else:
                 raise ValueError(f"Неожиданный формат: {target_format}")
 
-        except Exception as e:
+        except Exception:
             # Логируем неудачную конвертацию для основного метода
-            print(f"❌ Ошибка конвертации {target_format}: {str(e)}")
-            raise e
+            logger.exception("Conversion failed for target format %s", target_format)
+            raise
 
     def cleanup_files(self, *file_paths: str):
         """Remove only artifacts owned by this conversion."""
@@ -399,11 +392,11 @@ class FileConverter:
                     elif os.path.isdir(file_path):
                         shutil.rmtree(file_path, ignore_errors=True)
                         cleaned_count += 1
-            except OSError as e:
+            except OSError:
                 error_count += 1
-                print(f"Warning: Could not delete {file_path}: {e}")
+                logger.warning("Could not remove converter artifact", exc_info=True)
         if cleaned_count > 0 or error_count > 0:
-            print(f"Cleanup: {cleaned_count} files cleaned, {error_count} errors")
+            logger.debug("Converter cleanup removed %s files and hit %s errors", cleaned_count, error_count)
         return cleaned_count, error_count
 
     def get_error_strategy(self, error: Exception) -> dict:
@@ -489,9 +482,10 @@ class FileConverter:
 
     async def _convert_mp3_moviepy(self, input_path: str, output_path: str) -> str:
         """Fallback: конвертация MP3 через moviepy"""
-        clip = VideoFileClip(input_path)
-        clip.audio.write_audiofile(output_path, verbose=False, logger=None)
-        clip.close()
+        with VideoFileClip(input_path) as clip:
+            if clip.audio is None:
+                raise ValueError("В видеофайле нет аудиодорожки")
+            clip.audio.write_audiofile(output_path, logger=None)
         return output_path
 
     async def _convert_mp3_system(self, input_path: str, output_path: str) -> str:
@@ -513,9 +507,11 @@ class FileConverter:
 
     async def _convert_mp4_moviepy(self, input_path: str, output_path: str) -> str:
         """Fallback: конвертация MP4 через moviepy"""
-        clip = VideoFileClip(input_path)
-        clip.write_videofile(output_path, codec="libx264", bitrate="600k", fps=24, audio=True, verbose=False, logger=None)
-        clip.close()
+        with VideoFileClip(input_path) as clip:
+            clip.write_videofile(
+                output_path, codec="libx264", bitrate="600k",
+                fps=24, audio=True, logger=None
+            )
         return output_path
 
     async def _convert_mp4_basic(self, input_path: str, output_path: str) -> str:
@@ -531,9 +527,8 @@ class FileConverter:
 
     async def _convert_gif_moviepy(self, input_path: str, output_path: str) -> str:
         """Fallback: конвертация GIF через moviepy"""
-        clip = VideoFileClip(input_path)
-        clip.write_gif(output_path, fps=10, program='ffmpeg')
-        clip.close()
+        with VideoFileClip(input_path) as clip:
+            clip.write_gif(output_path, fps=10, logger=None)
         return output_path
 
     async def _convert_gif_basic(self, input_path: str, output_path: str) -> str:
@@ -591,7 +586,7 @@ class FileConverter:
             start_time = time.time()
 
             try:
-                print(f"🔄 Попытка {attempt + 1}/{max_retries} конвертации {target_format}")
+                logger.debug("Conversion attempt %s/%s for %s", attempt + 1, max_retries, target_format)
 
                 # Обновляем прогресс для retry попыток
                 if attempt > 0 and progress_callback:
@@ -604,13 +599,12 @@ class FileConverter:
                         strategy = self.get_error_strategy(last_error)
                         delay = strategy.get('delay', 2 ** attempt)
 
-                        print(f"📝 {strategy['message']}")
-                        print(f"⏳ Ожидание {delay} сек...")
+                        logger.debug("Retry strategy: %s; wait=%s seconds", strategy["message"], delay)
                         await asyncio.sleep(delay)
 
                         # Очищаем память если нужно
                         if strategy.get('cleanup'):
-                            print("🧹 Очищаю память...")
+                            logger.debug("Cleaning memory before converter retry")
                             import gc
                             gc.collect()
                     else:
@@ -620,7 +614,7 @@ class FileConverter:
                 result = await asyncio.to_thread(self.convert_file, input_path, target_format, user_id)
                 duration = time.time() - start_time
 
-                print(f"✅ Конвертация {target_format} успешна с попытки {attempt + 1}")
+                logger.info("Conversion succeeded for %s on attempt %s", target_format, attempt + 1)
 
                 # Обновляем прогресс при успехе
                 if progress_callback:
@@ -647,7 +641,10 @@ class FileConverter:
                 error_type = type(e).__name__
                 error_msg = str(e)[:200]  # Ограничиваем длину ошибки
 
-                print(f"❌ Попытка {attempt + 1} неудачна [{error_type}]: {str(e)}")
+                logger.warning(
+                    "Conversion attempt %s failed for %s (%s)",
+                    attempt + 1, target_format, error_type, exc_info=True,
+                )
 
                 # Логируем неудачную попытку
                 try:
@@ -665,7 +662,7 @@ class FileConverter:
 
                 # На последней попытке пробуем fallback методы
                 if attempt == max_retries - 1:
-                    print("🔄 Пробую fallback методы...")
+                    logger.info("Trying fallback conversion methods for %s", target_format)
 
                     if progress_callback:
                         await progress_callback.set_stage('fallback', 80)
@@ -673,14 +670,14 @@ class FileConverter:
                     try:
                         fallback_result = await self._try_fallback_methods(input_path, target_format, user_id, progress_callback)
                         if fallback_result:
-                            print(f"✅ Fallback метод успешен для {target_format}")
+                            logger.info("Fallback conversion succeeded for %s", target_format)
 
                             if progress_callback:
                                 await progress_callback.set_progress(100)
 
                             return fallback_result
                     except Exception as fallback_error:
-                        print(f"❌ Все fallback методы провалились: {str(fallback_error)}")
+                        logger.exception("All fallback methods failed for %s", target_format)
 
                         if progress_callback:
                             await progress_callback.complete(False, f"Fallback методы не сработали: {str(fallback_error)[:100]}")
@@ -693,7 +690,7 @@ class FileConverter:
 
         # Если все попытки провалились
         error_msg = f"Не удалось конвертировать файл в {target_format} после {max_retries} попыток. Последняя ошибка: {str(last_error)}"
-        print(f"💥 {error_msg}")
+        logger.error("Conversion exhausted all retries for %s", target_format)
         raise RuntimeError(error_msg)
 
     async def _try_fallback_methods(self, input_path: str, target_format: str, user_id: int = None, progress_callback: ConversionProgressCallback = None):
@@ -716,13 +713,13 @@ class FileConverter:
                 await progress_callback.set_stage(f'fallback_{method_name}', progress)
 
             try:
-                print(f"🔧 Пробую fallback метод: {method_name}")
+                logger.debug("Trying fallback method %s", method_name)
                 await method_func(input_path, output_path)
                 duration = time.time() - start_time
 
                 # Проверяем, что файл создался
                 if os.path.exists(output_path):
-                    print(f"✅ Fallback метод {method_name} успешен!")
+                    logger.info("Fallback method %s succeeded", method_name)
 
                     # Логируем успешный fallback
                     try:
@@ -739,12 +736,12 @@ class FileConverter:
 
                     return output_path
                 else:
-                    print(f"❌ Fallback метод {method_name} не создал файл")
+                    logger.warning("Fallback method %s did not create an output file", method_name)
 
-            except Exception as e:
+            except Exception as error:
                 duration = time.time() - start_time
-                error_msg = str(e)[:200]
-                print(f"❌ Fallback метод {method_name} провалился: {str(e)}")
+                error_msg = str(error)[:200]
+                logger.warning("Fallback method %s failed", method_name, exc_info=True)
 
                 # Логируем неудачный fallback
                 try:

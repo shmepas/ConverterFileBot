@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import Router, types, F
 from kbds import reply
 from utils import answer_editable
@@ -8,6 +10,7 @@ from handlers.user_privatka import MenuStates, build_dynamic_keyboard
 from aiogram.filters import Command
 
 user_reply_router = Router()
+logger = logging.getLogger(__name__)
 
 # === Главное меню ===
 @user_reply_router.message(F.text.in_(["Меню", "/menu", "📘 Меню"]))
@@ -100,10 +103,9 @@ async def show_payments_handler(message: types.Message):
     user_id = message.from_user.id
     try:
         payments = await db.get_user_payments(user_id)  # асинхронная функция из db.py
-    except Exception as e:
+    except Exception:
         await message.answer("⚠️ Ошибка при получении истории платежей.")
-        # лог в консоль
-        print("get_user_payments error:", e)
+        logger.exception("Could not read payment history for user_id=%s", user_id)
         return
 
     if not payments:

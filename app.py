@@ -1,14 +1,18 @@
 import os
 import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.bot import DefaultBotProperties
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
 
+from utiles.logging_config import configure_logging
+
+configure_logging()
+
 from data_base.db import init_db, init_super_admin, log_system_event
 from data_base.backup import backup_database
+from data_base.fsm_storage import KeyedEventIsolation, SQLiteFSMStorage
 from handlers.user_privatka import user_privatka_router
 from handlers.adminka import admin_router
 from handlers.user_reply import user_reply_router
@@ -18,6 +22,10 @@ from handlers.logs_router import logs_router
 from handlers.tickets import ticket_router
 from handlers.conversions import conversion_router
 from utiles.conversion_history import cleanup_expired_files
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query']
 
@@ -36,7 +44,7 @@ bot = Bot(
     token=TOKEN,
     default=DefaultBotProperties(parse_mode="HTML")
 )
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(storage=SQLiteFSMStorage(), events_isolation=KeyedEventIsolation())
 dp.update.middleware(LoggingMiddleware())
 
 # --------------------------
@@ -64,18 +72,20 @@ async def maintenance_loop():
         try:
             removed = await cleanup_expired_files()
             if removed:
-                print(f"Очищено временных файлов: {removed}")
+                logger.info("Expired temporary files removed: %s", removed)
         except Exception as exc:
-            print(f"Ошибка очистки временных файлов: {type(exc).__name__}")
+            logger.exception("Expired-file maintenance failed")
 
 
 async def backup_loop():
     while True:
         await asyncio.sleep(24 * 60 * 60)
         try:
-            await backup_database()
+            backup_path = await backup_database()
+            if backup_path is None:
+                logger.error("Scheduled database backup was not created")
         except Exception as exc:
-            print(f"Ошибка резервного копирования БД: {type(exc).__name__}")
+            logger.exception("Scheduled database backup failed")
 
 # --------------------------
 # Настройка команд бота
@@ -94,7 +104,7 @@ async def shutdown():
     except Exception:
         pass
     await bot.session.close()
-    print("\033[91mБот остановлен\033[0m")
+    logger.info("Bot stopped")
 
 # --------------------------
 # Основная функция запуска
@@ -105,13 +115,13 @@ async def main():
         await cleanup_expired_files()
         await backup_database()
     except Exception as exc:
-        print(f"Начальное обслуживание завершилось с ошибкой: {type(exc).__name__}")
+        logger.exception("Initial database maintenance failed")
     await bot.delete_webhook(drop_pending_updates=True)
     await setup_commands()
 
     # Логируем запуск
     await log_system_event("Бот запущен системой")
-    print("\033[92mБот запущен\033[0m")
+    logger.info("Bot started")
 
     maintenance_task = asyncio.create_task(maintenance_loop())
     backup_task = asyncio.create_task(backup_loop())

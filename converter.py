@@ -2,7 +2,7 @@ import os
 import pypandoc
 from PIL import Image
 import subprocess
-from moviepy.editor import VideoFileClip
+from moviepy import VideoFileClip
 from utils import FFMPEG_BINARY
 
 # pydub is optional on Windows; fallback to ffmpeg if not available
@@ -54,9 +54,10 @@ async def convert_file(src_path: str, target_format: str) -> str:
         elif ext in [".mp4", ".mov"] and target_format == "mp3":
             # prefer moviepy if available, otherwise use ffmpeg
             try:
-                clip = VideoFileClip(src_path)
-                clip.audio.write_audiofile(dst_path)
-                clip.close()
+                with VideoFileClip(src_path) as clip:
+                    if clip.audio is None:
+                        raise ValueError("В видеофайле нет аудиодорожки")
+                    clip.audio.write_audiofile(dst_path, logger=None)
             except Exception:
                 # ffmpeg fallback
                 subprocess.run([
