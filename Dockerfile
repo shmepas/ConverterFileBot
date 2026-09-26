@@ -15,8 +15,8 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements.txt
 
 COPY --chown=bot:bot . .
-RUN mkdir -p /app/data /app/downloads /app/logs /tmp/converter \
-    && chown -R bot:bot /app/data /app/downloads /app/logs /tmp/converter
+RUN mkdir -p /app/data /app/downloads /app/logs /app/converted/runtime /tmp/converter \
+    && chown -R bot:bot /app/data /app/downloads /app/logs /app/converted/runtime /tmp/converter
 
 ENV BOT_DB_PATH=/app/data/bot_database.db \
     BOT_BACKUP_DIR=/app/data/backups \
