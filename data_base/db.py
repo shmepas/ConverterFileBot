@@ -1,8 +1,12 @@
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "bot_database.db")
+
+
+class SupportTicketLimitReached(Exception):
+    """Raised when a user reaches the active or daily ticket creation limit."""
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
@@ -138,6 +142,86 @@ async def init_db():
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_support_tickets_user_created "
             "ON support_tickets(user_id, created_at DESC)"
+        )
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS support_ticket_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            sender_role TEXT NOT NULL CHECK (sender_role IN ('user', 'admin')),
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
+        )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_support_ticket_messages_ticket "
+            "ON support_ticket_messages(ticket_id, id)"
+        )
+        await db.execute("""
+            INSERT INTO support_ticket_messages
+                (ticket_id, sender_id, sender_role, message, created_at)
+            SELECT t.id, t.user_id, 'user', t.message, t.created_at
+            FROM support_tickets t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM support_ticket_messages m WHERE m.ticket_id = t.id
+            )
+        """)
+        await db.execute(
+            "UPDATE support_tickets SET status = 'waiting_user' WHERE status = 'answered'"
+        )
+        await db.execute("""
+            INSERT INTO support_ticket_messages
+                (ticket_id, sender_id, sender_role, message, created_at)
+            SELECT t.id, COALESCE(t.replied_by, 0), 'admin', t.admin_reply, t.updated_at
+            FROM support_tickets t
+            WHERE t.admin_reply IS NOT NULL AND t.admin_reply != ''
+              AND NOT EXISTS (
+                SELECT 1 FROM support_ticket_messages m
+                WHERE m.ticket_id = t.id AND m.sender_role = 'admin'
+              )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS retained_conversion_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            source_name TEXT NOT NULL,
+            detected_type TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retained_conversion_files_expiry "
+            "ON retained_conversion_files(expires_at)"
+        )
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS conversion_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            retained_file_id INTEGER,
+            source_name TEXT NOT NULL,
+            target_format TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('processing', 'success', 'failed', 'cancelled')),
+            error_message TEXT,
+            duration_seconds REAL,
+            output_size INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id),
+            FOREIGN KEY (retained_file_id) REFERENCES retained_conversion_files(id) ON DELETE SET NULL
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS conversion_rate_limits (
+            user_id INTEGER PRIMARY KEY,
+            last_started REAL NOT NULL
+        )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversion_history_user_created "
+            "ON conversion_history(user_id, created_at DESC)"
         )
         await db.commit()
 
@@ -298,13 +382,10 @@ async def clear_last_bot_message(user_id: int):
         await db.commit()
 
 async def is_admin(user_id: int) -> bool:
-    result = False
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
-            result = bool(row[0]) if row else False
-    print(f"[ADMIN DEBUG] is_admin check for user_id: {user_id} -> {result}")
-    return result
+            return bool(row[0]) if row else False
 
 async def add_admin(user_id: int):
     """Добавляет пользователя в админы с проверками"""
@@ -370,13 +451,10 @@ async def init_super_admin(user_id: int):
             print(f"[ADMIN DEBUG] super_admin already exists for user_id: {user_id}")
 
 async def is_super_admin(user_id: int) -> bool:
-    result = False
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM super_admin WHERE user_id = ?", (user_id,)) as cursor:
             result = await cursor.fetchone()
-    is_super = result is not None
-    print(f"[ADMIN DEBUG] is_super_admin check for user_id: {user_id} -> {is_super}")
-    return is_super
+    return result is not None
 
 
 async def has_admin_access(user_id: int) -> bool:
@@ -408,19 +486,42 @@ async def create_support_ticket(user_id: int, message: str) -> int:
         raise ValueError("Ticket message must contain 1 to 1800 characters")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    recent_cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT COUNT(*) FROM support_tickets WHERE user_id = ? "
+            "AND status IN ('open', 'waiting_user')",
+            (user_id,),
+        ) as cursor:
+            active_count = (await cursor.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM support_tickets WHERE user_id = ? AND created_at >= ?",
+            (user_id, recent_cutoff),
+        ) as cursor:
+            daily_count = (await cursor.fetchone())[0]
+        if active_count >= 3 or daily_count >= 5:
+            await db.rollback()
+            raise SupportTicketLimitReached
         cursor = await db.execute(
             "INSERT INTO support_tickets "
             "(user_id, message, status, created_at, updated_at) "
             "VALUES (?, ?, 'open', ?, ?)",
             (user_id, clean_message, now, now),
         )
+        ticket_id = cursor.lastrowid
+        await db.execute(
+            "INSERT INTO support_ticket_messages "
+            "(ticket_id, sender_id, sender_role, message, created_at) VALUES (?, ?, 'user', ?, ?)",
+            (ticket_id, user_id, clean_message, now),
+        )
         await db.commit()
-        return cursor.lastrowid
+        return ticket_id
 
 
 async def get_support_tickets(limit: int = 20, *, user_id: int | None = None,
-                              include_closed: bool = False) -> list[dict]:
+                              include_closed: bool = False,
+                              status: str | None = None) -> list[dict]:
     limit = max(1, min(int(limit), 100))
     query = (
         "SELECT t.id, t.user_id, t.message, t.status, t.admin_reply, "
@@ -432,7 +533,10 @@ async def get_support_tickets(limit: int = 20, *, user_id: int | None = None,
     if user_id is not None:
         clauses.append("t.user_id = ?")
         params.append(user_id)
-    if not include_closed:
+    if status in {"open", "waiting_user", "closed"}:
+        clauses.append("t.status = ?")
+        params.append(status)
+    if not include_closed and status != "closed":
         clauses.append("t.status != 'closed'")
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
@@ -459,16 +563,57 @@ async def get_support_ticket(ticket_id: int) -> dict | None:
             return dict(row) if row else None
 
 
+async def get_support_ticket_messages(ticket_id: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT sender_id, sender_role, message, created_at "
+            "FROM support_ticket_messages WHERE ticket_id = ? ORDER BY id",
+            (ticket_id,),
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
 async def reply_to_support_ticket(ticket_id: int, admin_id: int, reply: str) -> bool:
     clean_reply = reply.strip()
     if not clean_reply or len(clean_reply) > 1800:
         raise ValueError("Ticket reply must contain 1 to 1800 characters")
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cursor = await db.execute(
-            "UPDATE support_tickets SET status = 'answered', admin_reply = ?, "
+            "UPDATE support_tickets SET status = 'waiting_user', admin_reply = ?, "
             "replied_by = ?, updated_at = ? WHERE id = ? AND status = 'open'",
-            (clean_reply, admin_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ticket_id),
+            (clean_reply, admin_id, now, ticket_id),
         )
+        if cursor.rowcount == 1:
+            await db.execute(
+                "INSERT INTO support_ticket_messages "
+                "(ticket_id, sender_id, sender_role, message, created_at) "
+                "VALUES (?, ?, 'admin', ?, ?)",
+                (ticket_id, admin_id, clean_reply, now),
+            )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def user_reply_to_support_ticket(ticket_id: int, user_id: int, message: str) -> bool:
+    clean_message = message.strip()
+    if not clean_message or len(clean_message) > 1800:
+        raise ValueError("Ticket message must contain 1 to 1800 characters")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "UPDATE support_tickets SET status = 'open', updated_at = ? "
+            "WHERE id = ? AND user_id = ? AND status = 'waiting_user'",
+            (now, ticket_id, user_id),
+        )
+        if cursor.rowcount == 1:
+            await db.execute(
+                "INSERT INTO support_ticket_messages "
+                "(ticket_id, sender_id, sender_role, message, created_at) "
+                "VALUES (?, ?, 'user', ?, ?)",
+                (ticket_id, user_id, clean_message, now),
+            )
         await db.commit()
         return cursor.rowcount == 1
 
@@ -479,6 +624,153 @@ async def close_support_ticket(ticket_id: int) -> bool:
             "UPDATE support_tickets SET status = 'closed', updated_at = ? "
             "WHERE id = ? AND status != 'closed'",
             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ticket_id),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def add_retained_conversion_file(
+    user_id: int, source_name: str, detected_type: str, stored_path: str,
+    retention_hours: int = 24,
+) -> int:
+    now = datetime.now()
+    expires_at = now + timedelta(hours=max(1, retention_hours))
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "INSERT INTO retained_conversion_files "
+            "(user_id, source_name, detected_type, stored_path, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, source_name[:255], detected_type, stored_path,
+             now.strftime("%Y-%m-%d %H:%M:%S"), expires_at.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_retained_conversion_file(file_id: int, user_id: int) -> dict | None:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, user_id, source_name, detected_type, stored_path, expires_at "
+            "FROM retained_conversion_files WHERE id = ? AND user_id = ? AND expires_at > ?",
+            (file_id, user_id, now),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def create_conversion_history(
+    user_id: int, source_name: str, target_format: str,
+    retained_file_id: int | None = None,
+) -> int:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "INSERT INTO conversion_history "
+            "(user_id, retained_file_id, source_name, target_format, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'processing', ?)",
+            (user_id, retained_file_id, source_name[:255], target_format, now),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def update_conversion_history(
+    history_id: int, user_id: int, status: str, *, error_message: str | None = None,
+    duration_seconds: float | None = None, output_size: int | None = None,
+) -> bool:
+    if status not in {"success", "failed", "cancelled"}:
+        raise ValueError("Invalid conversion history status")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "UPDATE conversion_history SET status = ?, error_message = ?, "
+            "duration_seconds = ?, output_size = ? WHERE id = ? AND user_id = ?",
+            (status, (error_message or "")[:500] or None, duration_seconds,
+             output_size, history_id, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def get_user_conversion_history(user_id: int, limit: int = 10) -> list[dict]:
+    limit = max(1, min(int(limit), 50))
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT h.id, h.source_name, h.target_format, h.status, h.error_message, "
+            "h.duration_seconds, h.output_size, h.created_at, "
+            "r.id AS retained_file_id, r.expires_at "
+            "FROM conversion_history h LEFT JOIN retained_conversion_files r "
+            "ON r.id = h.retained_file_id AND r.expires_at > ? "
+            "WHERE h.user_id = ? ORDER BY h.created_at DESC, h.id DESC LIMIT ?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, limit),
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_conversion_history_entry(history_id: int, user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT h.id, h.user_id, h.source_name, h.target_format, h.status, "
+            "r.id AS retained_file_id, r.stored_path, r.detected_type, r.expires_at "
+            "FROM conversion_history h JOIN retained_conversion_files r "
+            "ON r.id = h.retained_file_id "
+            "WHERE h.id = ? AND h.user_id = ? AND h.status = 'success' "
+            "AND r.expires_at > ?",
+            (history_id, user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def cleanup_expired_conversion_history(retention_days: int = 90) -> list[dict]:
+    """Delete expired history metadata and return retained paths for safe filesystem cleanup."""
+    now = datetime.now()
+    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (now - timedelta(days=max(1, retention_days))).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, stored_path FROM retained_conversion_files WHERE expires_at <= ?",
+            (now_text,),
+        ) as cursor:
+            expired = [dict(row) for row in await cursor.fetchall()]
+        expired_ids = [row["id"] for row in expired]
+        for offset in range(0, len(expired_ids), 400):
+            batch = expired_ids[offset:offset + 400]
+            placeholders = ",".join("?" for _ in batch)
+            await db.execute(
+                f"DELETE FROM conversion_history WHERE retained_file_id IN ({placeholders})",
+                batch,
+            )
+            await db.execute(
+                f"DELETE FROM retained_conversion_files WHERE id IN ({placeholders})",
+                batch,
+            )
+        await db.execute("DELETE FROM conversion_history WHERE created_at < ?", (cutoff,))
+        await db.commit()
+        return expired
+
+
+async def claim_conversion_cooldown(user_id: int, cooldown_seconds: int = 5) -> bool:
+    """Atomically enforce a small cooldown between a user's conversion jobs."""
+    import time
+
+    now = time.time()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "UPDATE conversion_rate_limits SET last_started = ? "
+            "WHERE user_id = ? AND last_started <= ?",
+            (now, user_id, now - max(1, cooldown_seconds)),
+        )
+        if cursor.rowcount == 1:
+            await db.commit()
+            return True
+        cursor = await db.execute(
+            "INSERT OR IGNORE INTO conversion_rate_limits (user_id, last_started) VALUES (?, ?)",
+            (user_id, now),
         )
         await db.commit()
         return cursor.rowcount == 1

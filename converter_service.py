@@ -34,7 +34,15 @@ class FileConverter:
     }
 
     def __init__(self):
-        self.temp_dir = tempfile.gettempdir()
+        project_root = Path(__file__).resolve().parent
+        converted_root = project_root / "converted"
+        temp_dir = Path(os.getenv("CONVERTER_OUTPUT_DIR", str(converted_root / "runtime")))
+        if converted_root.is_symlink() or temp_dir.is_symlink():
+            raise RuntimeError("Каталог временных файлов не должен быть ссылкой")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir = str(temp_dir.resolve(strict=True))
+        if "CONVERTER_OUTPUT_DIR" not in os.environ:
+            Path(self.temp_dir).relative_to(project_root)
 
     def get_output_filename(self, input_filename: str, target_format: str) -> str:
         """Генерирует имя выходного файла."""

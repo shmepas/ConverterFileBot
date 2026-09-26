@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
 import asyncio
 import time
+from html import escape
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import FSInputFile
 from data_base import db
@@ -19,6 +20,7 @@ from utils import answer_editable
 from converter_service import file_converter
 from utiles.file_validator import file_validator
 from utiles.progress_tracker import progress_tracker
+from utiles.conversion_workflow import ConversionRejected, process_conversion
 
 user_privatka_router = Router()
 user_privatka_router.message.filter(lambda message: message.chat.type == "private")
@@ -424,7 +426,7 @@ async def handle_file(message: types.Message, state: FSMContext):
     await log_action(user_id, f"Отправил файл: {message.document.file_name}")
 
     file = message.document
-    file_name = file.file_name
+    file_name = file.file_name or f"{file.file_unique_id}.bin"
 
     # Валидация имени файла
     if not file_validator.validate_filename(file_name):
@@ -480,38 +482,17 @@ async def handle_file(message: types.Message, state: FSMContext):
         # Валидация загруженного файла
         print(f"🔍 Валидация загруженного файла: {file_path}")
 
-        # Определяем ожидаемый формат на основе MIME-типа
-        mime_type = file.mime_type
-        expected_format = "UNKNOWN"
-
-        if mime_type.startswith("audio/"):
-            expected_format = "MP3"
-        elif mime_type.startswith("video/"):
-            expected_format = "MP4"
-        elif mime_type == "image/gif":
-            expected_format = "GIF"
-        elif mime_type == "image/png":
-            expected_format = "PNG"
-        elif mime_type in ["image/jpeg", "image/jpg"]:
-            expected_format = "JPG"
-        elif mime_type == "application/pdf":
-            expected_format = "PDF"
-        elif mime_type in ["text/plain", "text/markdown"]:
-            expected_format = "TXT"
-
-        # Проводим валидацию исходного файла (не формата конвертации)
-        is_valid, error_message, validation_info = file_validator.full_validation(file_path, expected_format, user_id)
-
-        if not is_valid:
-            await answer_editable(message, f"❌ Файл не прошел валидацию: {error_message}")
-            # Удаляем невалидный файл
-            try:
-                os.remove(file_path)
-            except:
-                pass
+        detected_type = file_validator.detect_file_type(file_path)
+        available_formats = file_validator.TARGET_FORMATS_BY_INPUT_TYPE.get(detected_type, [])
+        if not available_formats:
+            await answer_editable(message, "❌ Этот тип файла не поддерживается для конвертации.")
+            os.remove(file_path)
             return
 
-        print(f"✅ Файл прошел валидацию (время: {validation_info['validation_time']:.2f}с)")
+        canonical_path = os.path.splitext(file_path)[0] + file_validator.canonical_extension(file_path, detected_type)
+        if canonical_path != file_path:
+            os.replace(file_path, canonical_path)
+            file_path = canonical_path
 
     except TelegramBadRequest as e:
         msg = str(e)
@@ -519,6 +500,8 @@ async def handle_file(message: types.Message, state: FSMContext):
             await answer_editable(message, "❌ Не могу скачать этот файл: Telegram отклонил запрос (файл слишком большой для бота).")
         else:
             await answer_editable(message, f"❌ Ошибка при скачивании: {msg}")
+        if os.path.exists(file_path):
+            os.remove(file_path)
         # Возвращаем в главное меню
         await state.set_state(MenuStates.main)
         kb = await build_dynamic_keyboard(user_id)
@@ -526,6 +509,8 @@ async def handle_file(message: types.Message, state: FSMContext):
         return
     except asyncio.TimeoutError:
         await answer_editable(message, "❌ Таймаут при скачивании файла. Попробуйте меньший файл.")
+        if os.path.exists(file_path):
+            os.remove(file_path)
         # Возвращаем в главное меню
         await state.set_state(MenuStates.main)
         kb = await build_dynamic_keyboard(user_id)
@@ -533,194 +518,73 @@ async def handle_file(message: types.Message, state: FSMContext):
         return
     except Exception:
         await answer_editable(message, "❌ Не удалось скачать или проверить файл. Попробуйте отправить его ещё раз.")
+        if os.path.exists(file_path):
+            os.remove(file_path)
         # Возвращаем в главное меню
         await state.set_state(MenuStates.main)
         kb = await build_dynamic_keyboard(user_id)
         await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
         return
 
-    await state.update_data(file_path=file_path)
+    await state.update_data(
+        file_path=file_path,
+        source_name=file_name,
+        source_type=detected_type,
+        available_formats=available_formats,
+    )
     await state.set_state(MenuStates.waiting_format)
 
     # Показываем сообщение с клавиатурой форматов
     await answer_editable(
         message,
-        f"📁 Файл '{file_name}' загружен!\n\n🎞 Теперь выберите формат для конвертации:",
-        reply_markup=reply.format_choice_kb()
+        f"📁 Файл '{escape(file_name)}' загружен!\n\n🎞 Доступные форматы:",
+        reply_markup=reply.format_choice_kb(available_formats)
     )
 
 # ------------------------------
 # Выбор формата после загрузки файла
 # ------------------------------
 @user_privatka_router.message(MenuStates.waiting_format, F.text.in_({"MP3", "MP4", "GIF", "PDF → PNG", "PDF → ZIP", "PNG → JPG", "PNG → JPEG", "TXT"}))
-async def user_format_selected_debug(message: types.Message, state: FSMContext):
-    """Обработка выбранного формата конвертации с проверкой лимитов - DEBUG VERSION."""
-    user_id = message.from_user.id
-    print(f"[USER_PRIVATKA DEBUG] 🎯 FORMAT SELECTED CALLED via user_privatka.py for user {user_id}")
-    print(f"[USER_PRIVATKA DEBUG] Selected format: {message.text}")
-    print(f"[USER_PRIVATKA DEBUG] Current state: {await state.get_state()}")
-
-    # Вызываем основную функцию
+async def user_format_selected_handler(message: types.Message, state: FSMContext):
+    """Dispatch a selected, file-compatible target format to the shared workflow."""
     await user_format_selected(message, state)
 async def user_format_selected(message: types.Message, state: FSMContext):
-    """Обработка выбранного формата конвертации с проверкой лимитов."""
+    """Run a conversion using the shared bounded worker and history workflow."""
     user_id = message.from_user.id
-    current_state = await state.get_state()
-    selected_format = message.text
-
-    print(f"[DEBUG MP3] user_format_selected called for user {user_id}, format: {selected_format}")
-
-    # Дополнительная проверка состояния
-    if current_state != MenuStates.waiting_format:
-        print(f"[DEBUG MP3] Unexpected state: {current_state}, expected: {MenuStates.waiting_format}")
-        await answer_editable(message, "⚠️ Неожиданное состояние. Возвращаю в главное меню.")
-        await state.clear()
-        kb = await build_dynamic_keyboard(user_id)
-        await answer_editable(message, "📋 Главное меню 👇", reply_markup=kb)
-        return
-
-    print(f"[DEBUG MP3] Starting conversion process for format: {selected_format}")
-    await log_action(user_id, f"Выбрал формат конвертации: {selected_format}")
-
     data = await state.get_data()
     file_path = data.get("file_path")
+    source_name = data.get("source_name") or "uploaded_file"
+    source_type = data.get("source_type") or "unknown"
+    available_formats = data.get("available_formats") or []
 
-    if not file_path or not os.path.exists(file_path):
+    if await state.get_state() != MenuStates.waiting_format:
+        await answer_editable(message, "⚠️ Выбор формата устарел. Отправьте файл заново.")
+        await state.clear()
+        return
+    if message.text not in available_formats:
+        await answer_editable(message, "⚠️ Выберите один из форматов, показанных для этого файла.")
+        return
+    if not file_path or not os.path.isfile(file_path):
         await answer_editable(message, "❌ Файл не найден. Отправьте его заново.")
-        # Возвращаем в главное меню
         await state.set_state(MenuStates.main)
-        kb = await build_dynamic_keyboard(user_id)
-        await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
+        await answer_editable(message, "Главное меню 👇", reply_markup=await build_dynamic_keyboard(user_id))
         return
 
-    fmt = message.text
-
-    # ПРОВЕРКА ЛИМИТОВ ПОДПИСКИ
-    limits = await db.check_user_limits(user_id)
-
-    # Проверяем лимит конвертаций для бесплатных пользователей
-    if not limits['is_premium']:
-        print(f"[DEBUG MP3] User {user_id} is free user, checking limits for format {fmt}")
-        print(f"[DEBUG MP3] Current limits: {limits}")
-
-        if not await db.increment_conversion_count(user_id):
-            # Лимит исчерпан - предлагаем купить подписку
-            limit_message = f"""🚫 **Дневной лимит исчерпан!**
-
-📊 **Ваш статус:**
-• Использовано сегодня: {limits['current_count']}/{limits['daily_limit']} конвертаций
-• Осталось: 0 конвертаций
-
-💎 **Хотите больше возможностей?**
-
-✅ **Премиум подписка даёт:**
-• 🚀 Безлимитные конвертации
-• 📁 Файлы до 100 МБ (вместо 20 МБ)
-• 🎯 Все форматы без ограничений
-• ⚡ Приоритетная обработка
-• 🔧 Расширенные функции
-
-💰 **Стоимость:** от 299₽/месяц
-
-Для покупки подписки нажмите "💰 Вариант оплаты" в меню 👇"""
-
-            await answer_editable(message, limit_message, parse_mode="Markdown")
-            await state.set_state(MenuStates.main)
-            kb = await build_dynamic_keyboard(user_id)
-            await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
-            return
-        else:
-            print(f"[DEBUG MP3] Successfully incremented conversion count for user {user_id}")
-    else:
-        print(f"[DEBUG MP3] User {user_id} is premium user, no limits")
-
-    # Проверяем размер файла в зависимости от подписки
-    if os.path.exists(file_path):
-        file_size = os.path.getsize(file_path)
-        if file_size > limits['max_file_size']:
-            if not limits['is_premium']:
-                await db.decrement_conversion_count(user_id)
-            await answer_editable(message, f"❌ Файл слишком большой для вашего тарифа!\n\n📄 Размер файла: {file_size // (1024*1024)} МБ\n🎯 Лимит: {limits['max_file_size'] // (1024*1024)} МБ")
-            await state.set_state(MenuStates.main)
-            kb = await build_dynamic_keyboard(user_id)
-            await answer_editable(message, "↩️ Возвращаю в главное меню", reply_markup=kb)
-            return
-
-    output_path = None
-
+    await log_action(user_id, f"Выбрал формат конвертации: {message.text}")
     try:
-        print(f"[DEBUG MP3] Starting conversion for user {user_id}, format: {fmt}")
-
-        # Создаем прогресс-трекер для этой конвертации
-        track_id = await progress_tracker.start_conversion_progress(user_id, message, fmt)
-
-        # Создаем callback для обновления прогресса
-        from utiles.progress_tracker import ConversionProgressCallback
-        progress_callback = ConversionProgressCallback(user_id, progress_tracker)
-
-        # Используем централизованный сервис конвертации с retry логикой и прогресс-баром
-        print(f"[DEBUG MP3] Calling file_converter.convert_file_with_retry for format: {fmt}")
-        output_path = await file_converter.convert_file_with_retry(file_path, fmt, user_id=user_id, progress_callback=progress_callback)
-        print(f"[DEBUG MP3] Conversion completed, output path: {output_path}")
-
-        # Отправляем результат пользователю
-        print(f"[DEBUG MP3] Sending result to user {user_id}")
-        await message.answer_document(FSInputFile(output_path), caption=f"✅ Файл конвертирован в {fmt}")
-        await log_action(user_id, f"Конвертировал файл в формат {fmt}")
-        print(f"[DEBUG MP3] Successfully sent result for user {user_id}, format: {fmt}")
-
-        # Для бесплатных пользователей показываем информацию об оставшихся конвертациях
-        if not limits['is_premium']:
-            remaining = max(0, limits['daily_limit'] - await db.get_daily_conversion_count(user_id))
-            if remaining >= 0:
-                remaining_message = f"""📊 **Конвертация выполнена!**
-
-✅ Файл успешно конвертирован в формат {fmt}
-
-📈 **Ваш статус:**
-• Осталось конвертаций на сегодня: {remaining}/5
-• Использовано: {5 - remaining}/5
-
-💎 **Хотите больше возможностей?**
-Премиум подписка даёт безлимитные конвертации и файлы до 100 МБ!
-
-Для покупки нажмите "💰 Вариант оплаты" в меню 👇"""
-                await answer_editable(message, remaining_message, parse_mode="Markdown")
-
-    except Exception as e:
-        if not limits['is_premium']:
-            try:
-                await db.decrement_conversion_count(user_id)
-            except Exception:
-                pass
-        # Логируем ошибку
-        tb = traceback.format_exc()
-        os.makedirs("logs", exist_ok=True)
-        log_file = os.path.join("logs", f"convert_error_{int(time.time())}.log")
-        try:
-            with open(log_file, "w", encoding="utf-8") as lf:
-                lf.write(tb)
-        except Exception:
-            pass
-
-        # Сохраняем в базу данных
-        try:
-            await log_action(user_id, f"Ошибка конвертации, см. {log_file}")
-        except Exception:
-            pass
-
-        # Уведомляем пользователя
-        short = str(e)[:200]
-        await answer_editable(message, f"❌ Ошибка конвертации: {short}\n(Полный лог сохранён)")
-
+        await process_conversion(
+            message, state, user_id, file_path, source_name,
+            source_type, message.text,
+        )
+    except ConversionRejected as exc:
+        await answer_editable(message, str(exc))
     finally:
-        # Очищаем временные файлы
-        file_converter.cleanup_files(file_path, output_path)
-
-        # Возвращаем пользователя в главное меню с клавиатурой
+        file_converter.cleanup_files(file_path)
         await state.set_state(MenuStates.main)
-        kb = await build_dynamic_keyboard(user_id)
-        await answer_editable(message, "↩️ Конвертация завершена! Возвращаю в главное меню", reply_markup=kb)
+        await answer_editable(
+            message, "↩️ Возвращаю в главное меню",
+            reply_markup=await build_dynamic_keyboard(user_id),
+        )
 
 # Удален дублирующий обработчик - теперь используется универсальный back_handler
 

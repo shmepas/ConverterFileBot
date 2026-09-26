@@ -11,8 +11,15 @@ import os
 import sys
 import hashlib
 import re
+import zipfile
 from pathlib import Path
 import time
+from PIL import Image
+
+try:
+    import fitz
+except ImportError:
+    fitz = None
 # Пытаемся импортировать python-magic, если недоступна - используем fallback
 MAGIC_AVAILABLE = False
 magic_error = None
@@ -61,6 +68,25 @@ class FileValidator:
         "PDF": 100 * 1024 * 1024,     # 100 МБ
         "TXT": 10 * 1024 * 1024,      # 10 МБ
         "DEFAULT": 20 * 1024 * 1024   # 20 МБ по умолчанию
+    }
+
+    INPUT_TYPES_BY_TARGET = {
+        "MP3": {"audio", "video"},
+        "MP4": {"video"},
+        "GIF": {"video"},
+        "PDF → PNG": {"pdf"},
+        "PDF → ZIP": {"pdf"},
+        "PNG → JPG": {"png"},
+        "PNG → JPEG": {"png"},
+        "TXT": {"pdf", "zip", "text"},
+    }
+    TARGET_FORMATS_BY_INPUT_TYPE = {
+        "audio": ["MP3"],
+        "video": ["MP3", "MP4", "GIF"],
+        "pdf": ["PDF → PNG", "PDF → ZIP", "TXT"],
+        "png": ["PNG → JPG", "PNG → JPEG"],
+        "zip": ["TXT"],
+        "text": ["TXT"],
     }
 
     # Запрещенные расширения (потенциально опасные)
@@ -126,84 +152,93 @@ class FileValidator:
         Returns:
             tuple: (is_valid, error_message)
         """
-        try:
-            # Определяем базовый формат для валидации
+        detected = self.detect_file_type(file_path)
+        allowed = self.INPUT_TYPES_BY_TARGET.get(expected_format)
+        if allowed is None:
             base_format = self.FORMAT_MAPPING.get(expected_format, expected_format)
+            allowed = {
+                "MP3": {"audio", "video"}, "MP4": {"video"}, "GIF": {"video"},
+                "PDF": {"pdf"}, "PNG": {"png"}, "JPG": {"jpeg"},
+                "JPEG": {"jpeg"}, "TXT": {"text", "zip", "pdf"},
+            }.get(base_format, set())
+        if detected in allowed:
+            return True, ""
+        return False, f"Фактический тип файла: {detected or 'неизвестен'}; он не поддерживается для {expected_format}"
 
-            if not MAGIC_AVAILABLE:
-                # Fallback: используем расширение файла для базовой проверки
-                file_ext = Path(file_path).suffix.lower().lstrip('.')
-                expected_ext = base_format.lower()
+    def detect_file_type(self, file_path: str) -> str:
+        """Detect supported types from file content; never trust its name or Telegram MIME header."""
+        try:
+            path = Path(file_path)
+            if not path.is_file() or path.is_symlink():
+                return "unknown"
+            with path.open("rb") as stream:
+                header = stream.read(4096)
 
-                # Простая проверка по расширению
-                if base_format in ["MP3", "MP4", "GIF", "PNG", "JPG", "JPEG", "PDF", "TXT"]:
-                    allowed_extensions = {
-                        "MP3": ["mp3", "wav", "ogg"],
-                        "MP4": ["mp4", "mov", "avi"],
-                        "GIF": ["gif"],
-                        "PNG": ["png"],
-                        "JPG": ["jpg", "jpeg"],
-                        "JPEG": ["jpg", "jpeg"],
-                        "PDF": ["pdf"],
-                        "TXT": ["txt", "md", "log"]
-                    }
-
-                    allowed_exts = allowed_extensions.get(base_format, [])
-                    if file_ext not in allowed_exts:
-                        return False, f"Неожиданное расширение файла: .{file_ext}. Ожидается одно из: {', '.join(allowed_exts)}"
-                else:
-                    return False, "python-magic не установлена, невозможно проверить тип файла"
-
-                return True, ""
-
-            # Получаем MIME-тип файла
-            mime_type = magic.from_file(file_path, mime=True)
-
-            # Проверяем, что MIME-тип разрешен для базового формата
-            allowed_types = self.ALLOWED_MIME_TYPES.get(base_format, [])
-
-            if mime_type in allowed_types:
-                # MIME-тип соответствует ожидаемому формату
-                return True, ""
-
-            # Если MIME-тип не соответствует, проверяем расширение файла
-            file_ext = Path(file_path).suffix.lower().lstrip('.')
-
-            # Маппинг расширений к базовым форматам
-            extension_to_format = {
-                "mp3": "MP3", "wav": "MP3", "ogg": "MP3",
-                "mp4": "MP4", "mov": "MP4", "avi": "MP4",
-                "gif": "GIF",
-                "png": "PNG",
-                "jpg": "JPG", "jpeg": "JPEG",
-                "pdf": "PDF",
-                "txt": "TXT", "md": "TXT", "log": "TXT"
-            }
-
-            detected_format = extension_to_format.get(file_ext)
-
-            if detected_format == base_format:
-                # Расширение соответствует ожидаемому формату
-                return True, ""
-
-            # Для изображений дополнительно проверяем магические числа
-            if base_format in ["PNG", "JPG", "JPEG"]:
+            if header.startswith(b"\x89PNG\r\n\x1a\n"):
+                return "png"
+            if header.startswith(b"\xff\xd8\xff"):
+                return "jpeg"
+            if header.startswith((b"GIF87a", b"GIF89a")):
+                return "gif"
+            if header.startswith(b"%PDF-"):
+                return "pdf"
+            if header.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+                return "zip"
+            if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+                return "audio"
+            if header.startswith(b"OggS"):
+                return "audio"
+            if header.startswith(b"ID3") or any(
+                header[index] == 0xFF and header[index + 1] & 0xE0 == 0xE0
+                for index in range(min(len(header) - 1, 64))
+            ):
+                return "audio"
+            if len(header) >= 12 and header[4:8] == b"ftyp":
+                return "video"
+            if b"ftyp" in header[:64]:
+                return "video"
+            if header and b"\x00" not in header and path.stat().st_size <= self.SIZE_LIMITS["TXT"]:
                 try:
-                    with open(file_path, 'rb') as f:
-                        header = f.read(8)
-
-                    if base_format == "PNG" and header.startswith(b'\x89PNG\r\n\x1a\n'):
-                        return True, ""
-                    elif base_format in ["JPG", "JPEG"] and (header.startswith(b'\xff\xd8') or header.startswith(b'\xff\xe0') or header.startswith(b'\xff\xe1')):
-                        return True, ""
-                except:
+                    header.decode("utf-8-sig")
+                    return "text"
+                except (UnicodeDecodeError, OSError):
                     pass
+            if MAGIC_AVAILABLE:
+                mime_type = magic.from_file(str(path), mime=True)
+                if mime_type.startswith("audio/"):
+                    return "audio"
+                if mime_type.startswith("video/"):
+                    return "video"
+            return "unknown"
+        except (OSError, ValueError):
+            return "unknown"
 
-            # Если ни MIME-тип, ни расширение, ни магические числа не совпадают
-            return False, f"Неожиданный тип файла: {mime_type}. Ожидается один из: {', '.join(allowed_types)}"
-
-        except Exception as e:
-            return False, f"Ошибка при определении типа файла: {str(e)}"
+    def canonical_extension(self, file_path: str, detected_type: str) -> str:
+        """Return the converter's expected suffix based on bytes, not supplied metadata."""
+        if detected_type == "audio":
+            try:
+                with open(file_path, "rb") as source:
+                    header = source.read(16)
+                if header.startswith(b"RIFF") and header[8:12] == b"WAVE":
+                    return ".wav"
+                if header.startswith(b"OggS"):
+                    return ".ogg"
+            except OSError:
+                pass
+            return ".mp3"
+        if detected_type == "video":
+            try:
+                with open(file_path, "rb") as source:
+                    header = source.read(16)
+                if header[4:8] == b"ftyp" and header[8:12] == b"qt  ":
+                    return ".mov"
+            except OSError:
+                pass
+            return ".mp4"
+        return {
+            "gif": ".gif", "png": ".png", "jpeg": ".jpg",
+            "pdf": ".pdf", "zip": ".zip", "text": ".txt",
+        }.get(detected_type, ".bin")
 
     def validate_file_size(self, file_path: str, target_format: str) -> tuple[bool, str]:
         """
@@ -227,81 +262,59 @@ class FileValidator:
             return False, f"Ошибка при проверке размера файла: {str(e)}"
 
     def validate_file_integrity(self, file_path: str, expected_format: str) -> tuple[bool, str]:
-        """
-        Проверяет целостность файла (базовая проверка)
-
-        Returns:
-            tuple: (is_valid, error_message)
-        """
+        """Check decoded structure and expansion limits for supported inputs."""
         try:
-            # Определяем базовый формат для валидации
-            base_format = self.FORMAT_MAPPING.get(expected_format, expected_format)
-
-            # Проверяем, что файл не пустой
-            if os.path.getsize(file_path) == 0:
+            if not os.path.isfile(file_path) or os.path.islink(file_path):
+                return False, "Файл не найден или является ссылкой"
+            if os.path.getsize(file_path) <= 0:
                 return False, "Файл пустой"
 
-            # Проверяем специфичные для форматов проблемы
-            if base_format in ["MP3", "MP4"]:
-                # Проверяем, что файл не поврежден (базовая проверка)
-                with open(file_path, 'rb') as f:
-                    header = f.read(16)
-                    if not header:
-                        return False, "Файл поврежден (не удалось прочитать заголовок)"
+            detected = self.detect_file_type(file_path)
+            if detected == "unknown":
+                return False, "Не удалось распознать содержимое файла"
+            type_valid, type_error = self.validate_file_type(file_path, expected_format)
+            if not type_valid:
+                return False, type_error
 
-                    # Проверяем магические числа для медиафайлов
-                    if base_format == "MP3":
-                        ext = Path(file_path).suffix.lower()
-                        valid_audio = (
-                            header.startswith((b'ID3', b'\xff\xfb', b'\xff\xfa', b'\xff\xf3', b'\xff\xf2'))
-                            or (ext == ".wav" and header.startswith(b'RIFF') and b'WAVE' in header)
-                            or (ext == ".ogg" and header.startswith(b'OggS'))
-                        )
-                        if not valid_audio:
-                            return False, "Не похоже на MP3 файл"
-
-                    elif base_format == "MP4":
-                        # MP4 файлы начинаются с ftyp
-                        if len(header) < 8 or header[4:8] != b'ftyp':
-                            return False, "Не похоже на MP4 файл"
-
-            elif base_format == "PDF":
-                # PDF файлы должны начинаться с %PDF
-                with open(file_path, 'rb') as f:
-                    header = f.read(4)
-                    if not header.startswith(b'%PDF'):
-                        return False, "Не похоже на PDF файл"
-
-            elif base_format in ["PNG", "JPG", "JPEG"]:
-                # Проверяем заголовки изображений (менее строгая проверка)
+            if detected in {"png", "jpeg", "gif"}:
+                with Image.open(file_path) as image:
+                    if image.width * image.height > 40_000_000:
+                        return False, "Изображение слишком большое для безопасной обработки"
+                    image.verify()
+            elif detected == "pdf" and fitz is not None:
+                document = fitz.open(file_path)
                 try:
-                    with open(file_path, 'rb') as f:
-                        header = f.read(8)
-
-                    if base_format == "PNG":
-                        # Для PNG проверяем начало заголовка (первые 4 байта)
-                        if not header.startswith(b'\x89PNG\r\n\x1a\n'):
-                            return False, "Не похоже на PNG файл"
-
-                    elif base_format in ["JPG", "JPEG"]:
-                        # Для JPEG проверяем первые 2 байта
-                        if len(header) >= 2 and header[:2] == b'\xff\xd8':
-                            pass  # JPEG файл прошел проверку
-                        else:
-                            return False, "Не похоже на JPEG файл"
-                except:
-                    return False, "Не удалось проверить заголовок изображения"
-
-            elif base_format == "GIF":
-                with open(file_path, 'rb') as f:
-                    header = f.read(6)
-                if header not in (b'GIF87a', b'GIF89a'):
-                    return False, "Не похоже на GIF файл"
-
+                    if document.page_count > 100:
+                        return False, "В PDF больше 100 страниц"
+                    if document.page_count == 0:
+                        return False, "В PDF нет страниц"
+                    total_pixels = 0
+                    for page in document:
+                        rect = page.rect
+                        pixels_at_conversion_scale = int(rect.width * rect.height * 4)
+                        if pixels_at_conversion_scale > 25_000_000:
+                            return False, "Страница PDF слишком большая для безопасной обработки"
+                        total_pixels += pixels_at_conversion_scale
+                        if total_pixels > 100_000_000:
+                            return False, "PDF слишком большой для конвертации в изображения"
+                finally:
+                    document.close()
+            elif detected == "zip":
+                with zipfile.ZipFile(file_path) as archive:
+                    entries = archive.infolist()
+                    if len(entries) > 1000:
+                        return False, "В архиве слишком много файлов"
+                    if sum(item.file_size for item in entries) > 100 * 1024 * 1024:
+                        return False, "Распакованный архив превышает лимит 100 МБ"
+                    if any(item.file_size > 0 and item.file_size / max(item.compress_size, 1) > 200 for item in entries):
+                        return False, "В архиве обнаружен подозрительный коэффициент сжатия"
+                    if archive.testzip() is not None:
+                        return False, "Архив повреждён"
+            elif detected == "text" and os.path.getsize(file_path) > self.SIZE_LIMITS["TXT"]:
+                return False, "Текстовый файл превышает лимит 10 МБ"
             return True, ""
-
         except Exception as e:
-            return False, f"Ошибка при проверке целостности файла: {str(e)}"
+            return False, f"Ошибка при проверке целостности файла: {str(e)[:160]}"
 
     def calculate_file_hash(self, file_path: str) -> str:
         """Вычисляет хеш файла для дедупликации"""

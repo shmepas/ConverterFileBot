@@ -554,175 +554,62 @@ async def format_selected(message: types.Message, state: FSMContext):
 
 @admin_router.message(FormatStates.waiting_file, F.content_type.in_({"document", "video", "audio"}))
 async def convert_file(message: types.Message, state: FSMContext):
+    """Validate and process admin conversions through the same bounded worker."""
+    from utiles.conversion_workflow import ConversionRejected, process_conversion
+    from utiles.file_validator import file_validator
+
     data = await state.get_data()
-    fmt = data.get("selected_format")
+    target_format = data.get("selected_format")
     file_obj = message.document or message.video or message.audio
-
-    if not file_obj:
-        await message.answer("❌ Файл не найден в сообщении.")
-        return
-
-    if not fmt:
-        await message.answer("⚠️ Сначала выберите формат.")
-        return
-
-    # Максимальный размер входящего файла для Telegram: 20 МБ
-    MAX_INPUT_SIZE = 20 * 1024 * 1024
-
-    # Проверяем размер входящего файла (супер-админам — без ограничения)
-    file_size = getattr(file_obj, "file_size", 0)
     user_id = message.from_user.id
-    if file_size > MAX_INPUT_SIZE:
-        if await is_super_admin(user_id):
-            await message.answer(f"⚠️ Ограничение входящего размера ({MAX_INPUT_SIZE // (1024*1024)} МБ) не применяется к супер-админу. Продолжаю загрузку и конвертацию.")
-        else:
-            await message.answer(f"🚫 Входящий файл слишком большой ({file_size // (1024*1024)} МБ). Максимум: {MAX_INPUT_SIZE // (1024*1024)} МБ.")
-            await state.clear()
-            return
-
-    temp_dir = tempfile.gettempdir()
-
-    # Проверяем наличие имени файла и создаем безопасное имя если нужно
-    if not hasattr(file_obj, 'file_name') or file_obj.file_name is None:
-        file_name = f"file_{user_id}_{int(time.time())}"
-    else:
-        file_name = file_obj.file_name
-
-    # Дополнительные проверки на None
-    if temp_dir is None:
-        await message.answer("❌ Ошибка: temp_dir равен None")
-        return
-    if file_name is None:
-        await message.answer("❌ Ошибка: file_name равен None")
-        return
-    if fmt is None:
-        await message.answer("❌ Ошибка: fmt равен None")
+    if not file_obj or not target_format:
+        await message.answer("⚠️ Сначала выберите формат и отправьте файл.")
+        await state.clear()
         return
 
-    work_dir = tempfile.mkdtemp(prefix=f"converter_admin_{user_id}_")
-    file_name = os.path.basename(file_name)
-    file_path = os.path.join(work_dir, file_name)
-    out_file = os.path.join(work_dir, f"output.{fmt.lower()}")
+    from data_base.db import check_user_limits
 
+    limits = await check_user_limits(user_id)
+    file_size = getattr(file_obj, "file_size", 0) or 0
+    if file_size > limits["max_file_size"]:
+        await message.answer(
+            f"🚫 Файл превышает лимит вашего тарифа ({limits['max_file_size'] // (1024 * 1024)} МБ)."
+        )
+        await state.clear()
+        return
+
+    work_dir = tempfile.mkdtemp(prefix="converter_admin_")
+    raw_name = getattr(file_obj, "file_name", None) or f"upload_{file_obj.file_unique_id}.bin"
+    safe_name = file_validator.get_safe_filename(raw_name, user_id)
+    file_path = os.path.join(work_dir, safe_name)
     try:
-        await message.answer("⏳ Скачиваю файл...")
+        file_info = await message.bot.get_file(file_obj.file_id)
+        if file_info.file_size and file_info.file_size > limits["max_file_size"]:
+            raise ValueError("Файл превышает лимит тарифа")
+        await message.bot.download_file(file_info.file_path, destination=file_path, timeout=300)
+        source_type = file_validator.detect_file_type(file_path)
+        if target_format not in file_validator.TARGET_FORMATS_BY_INPUT_TYPE.get(source_type, []):
+            raise ValueError("Содержимое файла не подходит для выбранного формата")
+        canonical_path = os.path.splitext(file_path)[0] + file_validator.canonical_extension(file_path, source_type)
+        if canonical_path != file_path:
+            os.replace(file_path, canonical_path)
+            file_path = canonical_path
 
-        # Скачиваем файл через бота
-        try:
-            file_info = await message.bot.get_file(file_obj.file_id)
-            await message.bot.download_file(file_info.file_path, destination=file_path)
-        except TelegramBadRequest as e:
-            # Telegram может отказать в выдаче файла, если он слишком большой для ботов
-            msg = str(e)
-            if "file is too big" in msg or "too big" in msg.lower():
-                await message.answer("❌ Не могу скачать этот файл: Telegram отклонил запрос (файл слишком большой для бота).")
-            else:
-                await message.answer(f"❌ Ошибка при скачивании файла: {msg}")
-            await state.clear()
-            return
-        except Exception as e:
-            await message.answer("❌ Не удалось скачать файл. Попробуйте отправить его ещё раз.")
-            await state.clear()
-            return
-
-        await message.answer("⏳ Конвертирую файл, это может занять время...")
-
-        # Создаем прогресс-трекер для этой конвертации
-        track_id = await progress_tracker.start_conversion_progress(user_id, message, fmt)
-
-        # Создаем callback для обновления прогресса
-        from utiles.progress_tracker import ConversionProgressCallback
-        progress_callback = ConversionProgressCallback(user_id, progress_tracker)
-
-        # Используем единый конвертер для всех форматов (с мониторингом производительности, retry логикой и прогресс-баром)
-        try:
-            out_file = await file_converter.convert_file_with_retry(file_path, fmt, user_id=user_id, progress_callback=progress_callback)
-            await log_action(user_id, f"Конвертировал файл через converter_service: {fmt}")
-        except Exception as e:
-            await message.answer("❌ Основной конвертер не справился; пробую запасной способ.")
-            # Fallback к старому методу только в крайнем случае
-            try:
-                await message.answer("⚠️ Пробую альтернативный метод конвертации...")
-
-                if fmt == "MP3":
-                    if file_path.lower().endswith((".mp3", ".wav", ".ogg")):
-                        await convert_audio_ffmpeg_async(file_path, out_file)
-                    else:
-                        clip = VideoFileClip(file_path)
-                        clip.audio.write_audiofile(out_file, verbose=False, logger=None)
-                        clip.close()
-                elif fmt == "MP4":
-                    await compress_video_ffmpeg_async(file_path, out_file, crf=30, max_width=640, audio_bitrate="64k", preset="fast")
-                elif fmt == "GIF":
-                    await convert_video_to_gif_ffmpeg_async(file_path, out_file, width=480, fps=12)
-                elif fmt == "PNG → JPG" or fmt == "PNG → JPEG":
-                    target_ext = "jpg" if fmt == "PNG → JPG" else "jpeg"
-                    if temp_dir is None or file_name is None:
-                        raise ValueError(f"temp_dir={temp_dir}, file_name={file_name}")
-                    out_file = os.path.join(work_dir, f"output.{target_ext}")
-                    from PIL import Image
-                    img = Image.open(file_path)
-                    if img.mode in ("RGBA", "LA", "P"):
-                        rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-                        if img.mode == "RGBA":
-                            rgb_img.paste(img, mask=img.split()[-1])
-                        else:
-                            rgb_img.paste(img)
-                        rgb_img.save(out_file, "JPEG", quality=90)
-                    else:
-                        img.save(out_file, "JPEG", quality=90)
-                elif fmt == "PDF → PNG":
-                    if fitz is None:
-                        raise ImportError("PyMuPDF не установлен")
-                    doc = fitz.open(file_path)
-                    if len(doc) > 0:
-                        page = doc[0]
-                        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                        out_file = os.path.join(work_dir, "output.png")
-                        pix.save(out_file)
-                    else:
-                        raise Exception("PDF файл пуст")
-                elif fmt == "PDF → ZIP":
-                    if fitz is None:
-                        raise ImportError("PyMuPDF не установлен")
-                    doc = fitz.open(file_path)
-                    out_file = os.path.join(work_dir, "output.zip")
-                    with zipfile.ZipFile(out_file, "w") as zipf:
-                        for i, page in enumerate(doc):
-                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                            img_name = f"page_{i + 1}.png"
-                            img_path = os.path.join(work_dir, img_name)
-                            pix.save(img_path)
-                            zipf.write(img_path, img_name)
-                            os.remove(img_path)
-                elif fmt == "TXT":
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
-                    out_file = os.path.join(work_dir, "output.txt")
-                    with open(out_file, "w", encoding="utf-8") as f:
-                        f.write(content)
-                else:
-                    raise ValueError(f"Неподдерживаемый формат: {fmt}")
-
-                await log_action(user_id, f"Конвертировал файл через fallback метод: {fmt}")
-
-            except Exception as fallback_error:
-                await message.answer("❌ Не удалось конвертировать файл. Проверьте формат файла.")
-                return
-
-        await message.answer_document(types.FSInputFile(out_file), caption=f"✅ Файл конвертирован в {fmt}")
-
+        await process_conversion(
+            message, state, user_id, file_path, raw_name, source_type,
+            target_format, charge_quota=False,
+        )
+    except ConversionRejected as exc:
+        await message.answer(str(exc))
     except Exception:
-        await message.answer("❌ Не удалось обработать файл. Проверьте формат файла и попробуйте снова.")
-
+        await message.answer("❌ Не удалось скачать или проверить файл. Проверьте формат и размер.")
     finally:
-        for path in (file_path, out_file):
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
         shutil.rmtree(work_dir, ignore_errors=True)
+        await state.set_state(AdminStates.main)
+        await answer_editable(
+            message, "Возврат в главное меню админки 👇",
+            reply_markup=await admin_main_kb(user_id),
+        )
 
 @admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_file)
 @admin_router.message(F.text == "⬅️ Назад", FormatStates.waiting_format)

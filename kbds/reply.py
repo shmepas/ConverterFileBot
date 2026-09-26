@@ -38,13 +38,14 @@ def file_menu_kb() -> ReplyKeyboardMarkup:
 # ==============================
 # Выбор формата конвертации
 # ==============================
-def format_choice_kb() -> ReplyKeyboardMarkup:
+def format_choice_kb(formats: list[str] | None = None) -> ReplyKeyboardMarkup:
+    formats = formats or ["MP3", "MP4", "GIF", "TXT", "PDF → PNG", "PDF → ZIP", "PNG → JPG", "PNG → JPEG"]
+    rows = []
+    for index in range(0, len(formats), 2):
+        rows.append([KeyboardButton(text=value) for value in formats[index:index + 2]])
+    rows.append([KeyboardButton(text="⬅️ Назад в меню")])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="MP3"), KeyboardButton(text="MP4"), KeyboardButton(text="GIF")],
-            [KeyboardButton(text="TXT"), KeyboardButton(text="PDF → PNG"), KeyboardButton(text="PDF → ZIP")],
-            [KeyboardButton(text="PNG → JPG"), KeyboardButton(text="PNG → JPEG"), KeyboardButton(text="⬅️ Назад в меню")]
-        ],
+        keyboard=rows,
         resize_keyboard=True
     )
 
