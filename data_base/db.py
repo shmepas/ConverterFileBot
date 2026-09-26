@@ -223,6 +223,10 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_conversion_history_user_created "
             "ON conversion_history(user_id, created_at DESC)"
         )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversion_history_status_created "
+            "ON conversion_history(status, created_at DESC)"
+        )
         await db.commit()
 
         # Миграция для обновления существующих таблиц
@@ -693,6 +697,54 @@ async def update_conversion_history(
         return cursor.rowcount == 1
 
 
+async def get_conversion_performance_stats(days: int = 90) -> dict:
+    """Aggregate completed conversion jobs from persistent history."""
+    days = max(1, min(int(days), 3650))
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COUNT(*) AS total_conversions, "
+            "SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successful_conversions, "
+            "SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_conversions, "
+            "AVG(CASE WHEN status = 'success' THEN duration_seconds END) AS average_time "
+            "FROM conversion_history "
+            "WHERE status IN ('success', 'failed') AND created_at >= ?",
+            (cutoff,),
+        ) as cursor:
+            totals = dict(await cursor.fetchone())
+
+        async with db.execute(
+            "SELECT target_format, COUNT(*) AS count, "
+            "SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successful_count, "
+            "SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count, "
+            "COALESCE(SUM(CASE WHEN status = 'success' "
+            "THEN duration_seconds ELSE 0 END), 0) AS total_time "
+            "FROM conversion_history "
+            "WHERE status IN ('success', 'failed') AND created_at >= ? "
+            "GROUP BY target_format "
+            "ORDER BY successful_count DESC, count DESC, target_format COLLATE NOCASE",
+            (cutoff,),
+        ) as cursor:
+            formats = {
+                row["target_format"]: {
+                    "count": row["count"],
+                    "successful_count": row["successful_count"],
+                    "failed_count": row["failed_count"],
+                    "total_time": row["total_time"],
+                }
+                for row in await cursor.fetchall()
+            }
+
+    return {
+        "total_conversions": totals["total_conversions"] or 0,
+        "successful_conversions": totals["successful_conversions"] or 0,
+        "failed_conversions": totals["failed_conversions"] or 0,
+        "average_time": totals["average_time"] or 0.0,
+        "formats_used": formats,
+    }
+
+
 async def get_user_conversion_history(user_id: int, limit: int = 10) -> list[dict]:
     limit = max(1, min(int(limit), 50))
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
@@ -726,7 +778,7 @@ async def get_conversion_history_entry(history_id: int, user_id: int) -> dict | 
 
 
 async def cleanup_expired_conversion_history(retention_days: int = 90) -> list[dict]:
-    """Delete expired history metadata and return retained paths for safe filesystem cleanup."""
+    """Expire retained source files and old history, preserving metrics for the retention period."""
     now = datetime.now()
     now_text = now.strftime("%Y-%m-%d %H:%M:%S")
     cutoff = (now - timedelta(days=max(1, retention_days))).strftime("%Y-%m-%d %H:%M:%S")
@@ -742,7 +794,8 @@ async def cleanup_expired_conversion_history(retention_days: int = 90) -> list[d
             batch = expired_ids[offset:offset + 400]
             placeholders = ",".join("?" for _ in batch)
             await db.execute(
-                f"DELETE FROM conversion_history WHERE retained_file_id IN ({placeholders})",
+                f"UPDATE conversion_history SET retained_file_id = NULL "
+                f"WHERE retained_file_id IN ({placeholders})",
                 batch,
             )
             await db.execute(

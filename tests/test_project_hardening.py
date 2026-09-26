@@ -144,6 +144,55 @@ class ProjectHardeningTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(removed, 1)
             self.assertFalse(saved.exists())
 
+    async def test_performance_stats_aggregate_persisted_conversion_history(self):
+        successful = await db.create_conversion_history(1001, "one.png", "PNG → JPG")
+        await db.update_conversion_history(successful, 1001, "success", duration_seconds=2.5)
+        failed = await db.create_conversion_history(1002, "two.png", "PNG → JPG")
+        await db.update_conversion_history(failed, 1002, "failed", duration_seconds=1.0)
+        other_format = await db.create_conversion_history(1001, "three.pdf", "PDF → TXT")
+        await db.update_conversion_history(other_format, 1001, "success", duration_seconds=3.5)
+        await db.create_conversion_history(1001, "unfinished.docx", "DOCX → PDF")
+
+        stats = await db.get_conversion_performance_stats(days=90)
+        self.assertEqual(stats["total_conversions"], 3)
+        self.assertEqual(stats["successful_conversions"], 2)
+        self.assertEqual(stats["failed_conversions"], 1)
+        self.assertEqual(stats["average_time"], 3.0)
+        self.assertEqual(stats["formats_used"]["PNG → JPG"]["count"], 2)
+        self.assertEqual(stats["formats_used"]["PNG → JPG"]["successful_count"], 1)
+
+    async def test_expired_retained_file_cleanup_preserves_recent_performance_history(self):
+        source = self.root / "retained.txt"
+        source.write_text("source", encoding="utf-8")
+        retained_id = await db.add_retained_conversion_file(
+            1001, "retained.txt", "text", str(source), retention_hours=1
+        )
+        history_id = await db.create_conversion_history(
+            1001, "retained.txt", "TXT → PDF", retained_id
+        )
+        await db.update_conversion_history(history_id, 1001, "success", duration_seconds=1.25)
+        async with aiosqlite.connect(db.DB_PATH) as connection:
+            expired = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            await connection.execute(
+                "UPDATE retained_conversion_files SET expires_at = ? WHERE id = ?",
+                (expired, retained_id),
+            )
+            await connection.commit()
+
+        expired_files = await db.cleanup_expired_conversion_history(retention_days=90)
+        self.assertEqual(len(expired_files), 1)
+        self.assertIsNone(await db.get_retained_conversion_file(retained_id, 1001))
+        async with aiosqlite.connect(db.DB_PATH) as connection:
+            async with connection.execute(
+                "SELECT status, retained_file_id FROM conversion_history WHERE id = ?",
+                (history_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        self.assertEqual(tuple(row), ("success", None))
+        stats = await db.get_conversion_performance_stats(days=90)
+        self.assertEqual(stats["total_conversions"], 1)
+        self.assertEqual(stats["successful_conversions"], 1)
+
     async def test_backup_is_atomic_and_integrity_checked(self):
         backup_dir = self.root / "backups"
         backup_path = await backup_database(db.DB_PATH, backup_dir)

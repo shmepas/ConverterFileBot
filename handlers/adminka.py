@@ -23,7 +23,6 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from moviepy.editor import VideoFileClip
 from utils import FFMPEG_BINARY, compress_video_ffmpeg_async, convert_video_to_gif_ffmpeg_async, answer_editable
-from utiles.performance import get_conversion_stats, get_popular_formats
 from converter_service import file_converter
 from utiles.progress_tracker import progress_tracker
 
@@ -32,7 +31,8 @@ from data_base.db import (
     add_admin, remove_admin, get_user_logs,
     get_all_subscriptions, get_pending_payments, mark_payment_completed,
     get_all_payments,
-    activate_premium_subscription, deactivate_subscription
+    activate_premium_subscription, deactivate_subscription,
+    get_conversion_performance_stats,
 )
 
 admin_router = Router()
@@ -848,12 +848,16 @@ async def performance_stats_handler(message: types.Message, state: FSMContext):
     await log_action(user_id, "Просматривает статистику производительности")
 
     try:
-        # Получаем статистику
-        stats = get_conversion_stats()
-        popular_formats = get_popular_formats(limit=5)
+        # История хранится в SQLite и доступна из отдельного процесса конвертации.
+        stats = await get_conversion_performance_stats(days=90)
+        popular_formats = sorted(
+            stats["formats_used"].items(),
+            key=lambda item: (item[1]["successful_count"], item[1]["count"]),
+            reverse=True,
+        )[:5]
 
         # Формируем текст статистики
-        stats_text = f"""📊 **Статистика производительности**
+        stats_text = f"""📊 **Статистика производительности за последние 90 дней**
 
 🔢 **Общая статистика:**
 • Всего конвертаций: {stats['total_conversions']}
@@ -865,16 +869,21 @@ async def performance_stats_handler(message: types.Message, state: FSMContext):
 
         if popular_formats:
             for i, (format_name, data) in enumerate(popular_formats, 1):
-                avg_time = data['total_time'] / data['count'] if data['count'] > 0 else 0
+                successful_count = data['successful_count']
+                avg_time = data['total_time'] / successful_count if successful_count else 0
                 stats_text += f"\n{i}. **{format_name}**: {data['count']} раз (ср. {avg_time:.1f}с)"
         else:
-            stats_text += "\n📭 Пока нет данных о конвертациях"
+            stats_text += "\n📭 Пока нет данных о конвертациях за последние 90 дней"
 
         # Добавляем детализацию по форматам
         if stats['formats_used']:
             stats_text += "\n\n📋 **Детализация по форматам:**"
-            for format_name, data in sorted(stats['formats_used'].items(), key=lambda x: x[1]['count'], reverse=True):
-                avg_time = data['total_time'] / data['count'] if data['count'] > 0 else 0
+            for format_name, data in sorted(
+                stats['formats_used'].items(),
+                key=lambda item: (item[1]['successful_count'], item[1]['count']),
+                reverse=True,
+            ):
+                avg_time = data['total_time'] / data['successful_count'] if data['successful_count'] else 0
                 stats_text += f"\n• {format_name}: {data['count']} конвертаций (ср. {avg_time:.1f}с)"
 
         # Возвращаемся в главное меню админки
