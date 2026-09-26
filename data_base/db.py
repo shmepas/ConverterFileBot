@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import logging
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "bot_database.db")
+DB_PATH = os.getenv("BOT_DB_PATH", os.path.join(os.path.dirname(__file__), "bot_database.db"))
 logger = logging.getLogger(__name__)
 
 

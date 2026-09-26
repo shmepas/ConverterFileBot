@@ -1,0 +1,28 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    env_file:
+      - .env
+    environment:
+      BOT_DB_PATH: /app/data/bot_database.db
+      BOT_BACKUP_DIR: /app/data/backups
+      CONVERTER_OUTPUT_DIR: /tmp/converter
+    volumes:
+      - bot-data:/app/data
+      - bot-downloads:/app/downloads
+      - bot-logs:/app/logs
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  bot-data:
+    name: converterfilebot-data
+  bot-downloads:
+    name: converterfilebot-downloads
+  bot-logs:
+    name: converterfilebot-logs

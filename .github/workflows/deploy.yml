@@ -1,0 +1,50 @@
+name: Deploy ConverterFileBot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: converterfilebot-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ vars.DEPLOY_HOST != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_HOST:?Set the DEPLOY_HOST repository variable}"
+          : "${DEPLOY_USER:?Set the DEPLOY_USER repository variable}"
+          : "${DEPLOY_PATH:?Set the DEPLOY_PATH repository variable}"
+          : "${DEPLOY_SSH_KEY:?Set the DEPLOY_SSH_KEY repository secret}"
+          : "${DEPLOY_KNOWN_HOSTS:?Set the DEPLOY_KNOWN_HOSTS repository secret}"
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+          remote_path="$(printf '%q' "$DEPLOY_PATH")"
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_PATH=$remote_path bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          git pull --ff-only origin main
+          docker compose up -d --build --remove-orphans
+          docker compose ps
+          REMOTE

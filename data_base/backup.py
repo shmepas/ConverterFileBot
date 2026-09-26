@@ -10,7 +10,7 @@ from pathlib import Path
 from data_base.db import DB_PATH
 
 
-BACKUP_DIR = Path(__file__).resolve().parent / "backups"
+BACKUP_DIR = Path(os.getenv("BOT_BACKUP_DIR", str(Path(__file__).resolve().parent / "backups")))
 BACKUP_COUNT = 7
 
 
